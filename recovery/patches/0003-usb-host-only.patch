@@ -1,0 +1,125 @@
+--- a/drivers/usb/musb/musb_ark.c
++++ b/drivers/usb/musb/musb_ark.c
+@@ -375,102 +375,8 @@
+ 
+ static int ark_musb_set_mode(struct musb *musb, u8 mode)
+ {
+-	struct device *dev = musb->controller;
+-	struct ark_glue *glue = dev_get_drvdata(dev->parent);
+-	int gpio_pwr = glue->gpio_pwr;
+-	int gpio_id = glue->gpio_id;
+-	int usb_id_reg = glue->usb_id_reg;
+-	int usb_id_offset = glue->usb_id_offset;
+-	u32 bitoffset = glue->usb_softrest_bit_offset;
+-	u32 phybitoffset = glue->usbphy_softrest_bit_offset;
+-	void __iomem *sys_softrest_base = (void __iomem *)((unsigned int)glue->sys_base + glue->usb_softrest_reg_offset);
+-	u32 regval;
+-
+-	/*usb_hcd_resume_root_hub(musb->hcd);
+-	musb_root_disconnect(musb);
+-	musb_g_reset(musb);*/
+-
+-	switch (mode) {
+-		case MUSB_HOST:
+-			break;
+-		case MUSB_PERIPHERAL:
+-			dev_info(musb->controller, "+Switch peripheral %d  %d=== \n", gpio_id, gpio_pwr);
+-			musb->xceiv->otg->state = OTG_STATE_B_IDLE;
+-
+-			if (gpio_id >= 0)
+-				gpio_set_value(gpio_id, 1);
+-			else if((usb_id_reg >= 0) && (usb_id_offset >= 0)) {
+-				void __iomem *sys_usb_id_base = (void __iomem *)((unsigned int)glue->sys_base + glue->usb_id_reg);
+-				regval = readl(sys_usb_id_base);
+-				regval |= (1<<usb_id_offset);
+-				writel(regval, sys_usb_id_base);
+-			}
+-
+-			regval = readl(sys_softrest_base);
+-			regval &= (~((1 << bitoffset) | (1 << phybitoffset)));//usb and usbphy
+-			writel(regval, sys_softrest_base);
+-			mdelay(1);
+-			regval = readl(sys_softrest_base);
+-			regval |= ((1 << bitoffset) | (1 << phybitoffset));
+-			writel(regval, sys_softrest_base);
+-
+-			mdelay(1);
+-
+-			musb_writeb(musb->mregs, MUSB_DEVCTL, 0x99);
+-			musb_writeb(musb->mregs,0x01,0xf0);
+-			musb_g_reset(musb);
+-			
+-			regval = musb_readb(musb->mregs, MUSB_INTRUSBE); 
+-			musb_writeb(musb->mregs, MUSB_INTRUSBE, regval | MUSB_INTR_SUSPEND);
+-			if (musb->is_runtime_suspended) {
+-				printk("%s:%d suspend save\n", __func__, __LINE__);
+-				musb->context.power = musb_readb(musb->mregs, MUSB_POWER);
+-				musb->context.intrusbe = musb_readb(musb->mregs, MUSB_INTRUSBE);
+-				musb->context.devctl = musb_readb(musb->mregs, MUSB_DEVCTL);
+-			}
+-			break;
+-		case MUSB_OTG:
+-			dev_info(musb->controller, "+++Switch OTG %d  %d===+++ \n", gpio_id, gpio_pwr);
+-			musb->xceiv->otg->state = OTG_STATE_A_HOST;
+-			if (gpio_id >= 0)
+-				gpio_set_value(gpio_id, 0);
+-			else if((usb_id_reg >= 0) && (usb_id_offset >= 0)) {
+-				void __iomem *sys_usb_id_base = (void __iomem *)((unsigned int)glue->sys_base + glue->usb_id_reg);
+-				regval = readl(sys_usb_id_base);
+-				regval &= ~(1<<usb_id_offset);
+-				writel(regval, sys_usb_id_base);
+-			}
+-			regval = readl(sys_softrest_base);
+-			regval &= (~(1 << bitoffset));
+-			writel(regval, sys_softrest_base);
+-			mdelay(1);
+-			regval = readl(sys_softrest_base);
+-			regval |= ((1 << bitoffset));
+-			writel(regval, sys_softrest_base);
+-
+-			mdelay(1);
+-			
+-			musb_writeb(musb->mregs, MUSB_INTRUSBE, 0xf4);
+-			musb_writeb(musb->mregs, MUSB_DEVCTL, 0x99);
+-			if (gpio_pwr >= 0) {
+-				gpio_set_value(gpio_pwr, 0);
+-				mdelay(10);
+-				gpio_set_value(gpio_pwr, 1);
+-			}
+-
+-			if (musb->is_runtime_suspended) {
+-				printk("%s:%d suspend save\n", __func__, __LINE__);
+-				musb->context.power = musb_readb(musb->mregs, MUSB_POWER);
+-				musb->context.intrusbe = musb_readb(musb->mregs, MUSB_INTRUSBE);
+-				musb->context.devctl = musb_readb(musb->mregs, MUSB_DEVCTL);
+-			}
+-			break;
+-		default:
+-			dev_err(glue->dev, "unsupported mode %d\n", mode);
+-			return -EINVAL;
+-	}
+-
+-	return 0;
++	/* This recovery image only consumes the host port prepared by U-Boot. */
++	return mode == MUSB_HOST ? 0 : -EOPNOTSUPP;
+ }
+ 
+ static void ark_musb_set_vbus(struct musb *musb, int is_on)
+@@ -573,6 +479,8 @@
+ 	.quirks		= MUSB_INDEXED_EP | MUSB_DMA_INVENTRA,
+ 	.dma_init	= musbhs_dma_controller_create,
+ 	.dma_exit	= musbhs_dma_controller_destroy,
++#else
++	.quirks		= MUSB_INDEXED_EP,
+ #endif
+ 	.enable		= ark_musb_enable,
+ 	.disable	= ark_musb_disable,
+@@ -621,7 +529,7 @@
+ {
+ 	const struct of_device_id *match;
+ 	struct ark_glue *glue;
+-	struct musb_hdrc_platform_data pdata;
++	struct musb_hdrc_platform_data pdata = { 0 };
+ 	struct resource	resources[3];
+ 	struct resource	*res;
+ 	struct musb_hdrc_config	*config;

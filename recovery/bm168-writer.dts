@@ -1,0 +1,18 @@
+// SPDX-License-Identifier: GPL-2.0
+// Bounded writer: the read-only storage platform plus exactly one writable
+// window, given at build time as WRITE_WINDOW_START/WRITE_WINDOW_SIZE. Every
+// other partition keeps its read-only flag. The NAND driver enforces the same
+// window in its erase/program paths and starts disarmed.
+#include "bm168-readonly.dts"
+/ {
+    model = "BM168 bounded writer recovery";
+};
+&nfc {
+    autotop,write-window = <WRITE_WINDOW_START WRITE_WINDOW_SIZE>;
+    partitions {
+        autotop-write-window {
+            label = "autotop-write-window";
+            reg = <WRITE_WINDOW_START WRITE_WINDOW_SIZE>;
+        };
+    };
+};

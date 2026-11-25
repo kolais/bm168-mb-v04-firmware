@@ -1,0 +1,34 @@
+AUTOTOP: MUSB host (U DISK): back to mainline 4.19 in the two places the
+vendor changed under NICHOLAS_ADD and downstream linux-arkmicro c195cb9
+reverted: TX FIFO flush retries (vendor 1, mainline 1000: gives up at once
+under load) and forcing transfers of 64 bytes or less onto PIO. Goes with
+the Inventra DMA the spike config now enables; stock moves U DISK data with
+the controller's own DMA (one DMA interrupt per 512-byte packet, 19 MB/s),
+while the PIO-only 4.19 spike reset the stick mid-read under load (SPIKE16).
+--- a/drivers/usb/musb/musb_host.c	2026-11-18 20:37:32
++++ b/drivers/usb/musb/musb_host.c	2026-11-18 20:37:40
+@@ -90,11 +90,7 @@
+ 	struct musb	*musb = ep->musb;
+ 	void __iomem	*epio = ep->regs;
+ 	u16		csr;
+-#if NICHOLAS_ADD
+-	int		retries = 1;
+-#else
+ 	int		retries = 1000;
+-#endif
+ 
+ 	csr = musb_readw(epio, MUSB_TXCSR);
+ 	while (csr & MUSB_TXCSR_FIFONOTEMPTY) {
+--- a/drivers/usb/musb/musbhsdma.c
++++ b/drivers/usb/musb/musbhsdma.c
+@@ -191,10 +191,6 @@
+ 	struct musb_dma_controller *controller = musb_channel->controller;
+ 	struct musb *musb = controller->private_data;
+ 
+-#if NICHOLAS_ADD
+-	if(len <= 64)
+-		return false;
+-#endif
+ 	musb_dbg(musb, "ep%d-%s pkt_sz %d, dma_addr %pad length %d, mode %d",
+ 		musb_channel->epnum,
+ 		musb_channel->transmit ? "Tx" : "Rx",

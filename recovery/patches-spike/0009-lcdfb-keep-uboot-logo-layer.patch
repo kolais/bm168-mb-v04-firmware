@@ -1,0 +1,26 @@
+AUTOTOP: keep U-Boot's boot logo layer (OSD2, CONTROL bit 8) at the LCD
+driver's first initialisation instead of overwriting CONTROL; the logo then
+stays until Launcher writes "24 1" to /proc/display (ark_display_compat),
+as on stock (end state CONTROL 0x03600081).
+
+--- a/drivers/video/fbdev/arkmicro/ark1668_lcdfb.c
++++ b/drivers/video/fbdev/arkmicro/ark1668_lcdfb.c
+@@ -431,11 +431,18 @@
+ 
+ 	/* Initialize control register */
+ 	if(!set_par){
++		/* AUTOTOP: U-Boot shows the boot logo on OSD2 (CONTROL bit 8,
++		 * buffer 0x0be00000). Keep that layer on, as stock does, until
++		 * the UI takes over: Launcher writes "24 1" to /proc/display
++		 * (ark_display_compat), which shows OSD1 and hides OSD2. */
++		u32 uboot = lcdc_readl(sinfo, ARK1668_LCDC_CONTROL);
++
+ 		value = (6 << 23) | (1 << 0);
+ 		/* set interrupt at the start of the front porch when vfp is not zero */
+ 		if (info->var.lower_margin)
+ 			value |= (3 << 21);
+ 		value |= pdata->lcd_wiring_mode << 18;
++		value |= uboot & (1 << 8);
+ 		lcdc_writel(sinfo, ARK1668_LCDC_CONTROL, value);
+ 	}
+ 

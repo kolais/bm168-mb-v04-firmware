@@ -1,0 +1,61 @@
+#!/bin/sh
+export PATH=/bin:/usr/bin
+export HOME=/root
+export PS1='ram-spike # '
+export OPENSSL_CONF=/dev/null
+/bin/busybox mount -t proc proc /proc
+/bin/busybox mount -t sysfs sysfs /sys
+/bin/busybox mount -t debugfs -o ro,nosuid,nodev,noexec debugfs /sys/kernel/debug
+/bin/busybox mount -t devtmpfs devtmpfs /dev
+exec </dev/console >/dev/console 2>&1
+echo 'Plan A spike: NAND read-only; LCD, GPU and Wi-Fi modules are loaded manually.'
+echo 'NAND filesystems are not attached or mounted; S-Loader ECC is unvalidated.'
+# Trigger only the U DISK child after core probe, matching stock startup order.
+mode=/sys/bus/platform/devices/musb-hdrc.1/mode
+if test -w "$mode"; then
+    echo host > "$mode" || echo 'U DISK host startup failed'
+else
+    echo 'U DISK mode control missing; USB bring-up is unproven'
+fi
+count=0
+while ! test -b /dev/sda1 && test "$count" -lt 20; do
+    /bin/busybox sleep 1
+    count=$((count + 1))
+done
+if test -b /dev/sda1; then
+    /bin/busybox blockdev --setro /dev/sda &&
+        /bin/busybox blockdev --setro /dev/sda1 &&
+        /bin/busybox mount -t vfat -o ro,nosuid,nodev,noexec /dev/sda1 /mnt/usb
+fi
+/bin/busybox mkdir -p /var/run/hostapd /var/run/wpa_supplicant /lib/modules
+/bin/busybox ifconfig lo 127.0.0.1 up
+for f in /sys/bus/sdio/devices/*; do
+    test -e "$f/vendor" && echo "SDIO ${f##*/} vendor=$(cat $f/vendor) device=$(cat $f/device)"
+done
+/bin/busybox mkdir -p /mnt/stock /lib/modules/$(/bin/busybox uname -r)
+# Plan A projection session at boot (option A, USB boot): only when the
+# U DISK stick carries PLANA.CFG. It may set SQF, DATA, GOC and MCU_ALLOW
+# (KEY=value lines; values limited to [A-Za-z0-9._ ]); anything else is
+# ignored. The session runs in the background; the console shell stays.
+cfg=/mnt/usb/PLANA.CFG
+if test -f "$cfg"; then
+    for key in SQF DATA GOC MCU_ALLOW LAUNCHER AP_SSID AP_PSK; do
+        val=$(/bin/busybox sed -n "s/^$key=\([A-Za-z0-9._ ]*\)\r*$/\1/p" "$cfg" | /bin/busybox head -1)
+        test -n "$val" && export "$key=$val"
+    done
+    sqf=${SQF:-STOCK11.SQF}
+    echo "Plan A autostart: $sqf, data ${DATA:-DATA.TAR}, pairing ${GOC:-GOC.TAR}"
+    (
+        /bin/busybox mount -t squashfs -o loop,ro "/mnt/usb/$sqf" /mnt/stock &&
+            SQF=$sqf /mnt/stock/opt/autotop/plana-up.sh base &&
+            SQF=$sqf /mnt/stock/opt/autotop/plana-up.sh run
+        echo "plana-auto: exit $?"
+    ) > /tmp/plana-auto.log 2>&1 < /dev/null &
+fi
+echo AUTOTOP_SPIKE_RECOVERY_READY
+/bin/busybox uname -a
+/bin/busybox cat /proc/mtd /proc/mounts
+while :; do
+    /bin/sh -i
+    echo 'Shell exited; starting another shell.'
+done

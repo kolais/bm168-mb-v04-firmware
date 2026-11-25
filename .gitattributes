@@ -1,0 +1,4 @@
+# Patch checksums and CRLF context must survive checkout unchanged.
+*.patch -text
+# Preserve captured device output verbatim.
+docs/boot-logs/* -text

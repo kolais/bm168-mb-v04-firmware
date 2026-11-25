@@ -1,0 +1,12 @@
+#!/bin/sh
+# Every developer session goes through here (the SSH server's forced
+# command, recovery/plan-a/dev-access): never a login shell. The image's
+# /etc/profile is stock's own start-up, and a login shell would run it:
+# load stock's drivers and start stock's Launcher over the running system.
+export PATH=/opt/autotop/sys:/opt/autotop/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export HOME=/root PS1='autotop # '
+cd /tmp 2> /dev/null
+if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
+    exec /bin/sh -c "$SSH_ORIGINAL_COMMAND"	# "ssh unit COMMAND", and scp
+fi
+exec /bin/sh -i

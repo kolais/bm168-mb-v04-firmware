@@ -1,0 +1,40 @@
+#!/bin/sh
+# This session's logs as one tar file, for the update page's "Save this
+# session's logs" and for a developer:
+#
+#   logs-pack FILE
+#
+# The kernel's messages, every log under /tmp (the launcher, the MCU link,
+# the session's start, the updater) and under the stock root's /tmp (the
+# Bluetooth and CarPlay services, the access point), and a few facts about
+# the running system. The last 2 MB of each: they live in RAM, and so does
+# the file. They name the phones the unit knows: the file is for the owner
+# to hand on, the unit sends it nowhere.
+B=/bin/busybox
+R=/mnt/stock
+out=${1:?usage: logs-pack FILE}
+d=/tmp/logs-pack.$$
+$B rm -rf $d
+$B mkdir -p $d/autotop-logs/stock || exit 1
+cd $d/autotop-logs || exit 1
+$B dmesg > kernel.log 2>&1
+for f in /tmp/*.log; do
+    [ -f "$f" ] && $B tail -c 2097152 "$f" > "${f##*/}"
+done
+for f in $R/tmp/*.log; do
+    [ -f "$f" ] && $B tail -c 2097152 "$f" > "stock/${f##*/}"
+done
+{
+    $B uname -a
+    echo "uptime $($B cut -d' ' -f1 /proc/uptime) s"
+    $B cat /opt/autotop/app-version /opt/autotop/system-level 2> /dev/null
+    /opt/autotop/app-slot status 2>&1
+    /opt/autotop/dev-access status 2>&1
+    $B cat /proc/meminfo /proc/mounts /proc/mtd
+    $B ps
+} > system.txt 2>&1
+$B tar -c -f "$out.new" -C $d autotop-logs && $B mv "$out.new" "$out"
+rc=$?
+cd /
+$B rm -rf $d
+exit $rc

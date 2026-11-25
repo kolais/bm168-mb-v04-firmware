@@ -1,0 +1,288 @@
+#!/bin/sh
+# The unit's own part ("the app": the launcher and its tools, the session
+# script, the state archive's script, carplay's wrapper and icon) can be
+# replaced without writing the image: a signed bundle is kept on the stock
+# userdata partition (/mnt/state, the one place that is written at run time;
+# init-b mounts it) and takes the place of the copy built into the image.
+# Everything else, the vendor's root filesystem and the kernel, is "the
+# system" and changes only through the verified writer.
+#
+#   app-slot select        at start (init-b): pick the app to run, unpack it
+#                          into RAM and put it over the image's own copy
+#   app-slot check FILE    is FILE a bundle this unit would take? "ok VERSION"
+#   app-slot install FILE  check it, keep it in place of the one kept so far,
+#                          on trial
+#   app-slot confirm       the app that runs is good (said by the launcher
+#                          once it has been up a while): the trial is over
+#   app-slot watch         after `select`, in the background (init-b): a trial
+#                          that has not confirmed in WATCH seconds is not
+#                          working; the unit restarts, which counts the start
+#   app-slot status        what runs, what is kept
+#
+# A bundle is a plain tar of three files: "manifest" (text), "manifest.sig"
+# (RSA, SHA-256, by the key whose public half is in the image) and "app.zip"
+# (the files, as they lie under /opt/autotop). The manifest:
+#
+#   autotop-app 1
+#   version N      a whole number that only grows
+#   system M       the least system level it runs on (/opt/autotop/system-level)
+#   sha256 HEX     of app.zip
+#
+# One bundle is kept (app-a.bundle): the partition has 2.9 MB in all and a
+# bundle is 1.4 MB (measured on the unit, 2026-11-24), so there is no room
+# for the one before beside it. The way back is the image's own copy, which
+# is always there. A control file says what the kept bundle is:
+#
+#   active a|-     it has proven itself
+#   trial a|-      it was installed and has not confirmed yet
+#   tries N        starts left for the trial
+#
+# At each start: a trial with starts left is taken (one start fewer); else
+# the proven bundle; else the image's own copy. The bundle is only taken if
+# its signature and hash are right, it is newer than the image's copy and
+# the system is new enough for it; otherwise the image's copy. A trial that
+# never confirms (it crashes, hangs or is switched off first, twice) is
+# dropped at the third start and the unit runs the image's copy. An install
+# removes the kept bundle first, then writes the new one beside, reads it
+# back and renames it, and the control file likewise: a power cut at any
+# point leaves either no bundle (the image's copy runs) or a whole one.
+#
+# Exit: 0 done; 1 refused or failed (a line says why).
+B=${B:-/bin/busybox}
+O=${O:-/usr/bin/openssl}
+SYS=${SYS:-/opt/autotop}		# the image: update-key.pem, system-level, app-version
+STATE=${STATE:-/mnt/state}		# the userdata partition
+D=$STATE/autotop
+W=${W:-/mnt/app}			# RAM: the unpacked app, what runs
+TARGETS=${TARGETS:-"/mnt/stock/opt/autotop /opt/autotop"}	# where the image's copy lies
+ENTRIES="bin plana-up.sh state-save carplay-run carplay-icon.png"
+TRIES=2
+WATCH=${WATCH:-150}
+export OPENSSL_CONF=/dev/null
+
+say() { echo "app: $*"; }
+num() { case "$1" in '' | *[!0-9]*) return 1 ;; esac; [ ${#1} -le 9 ]; }
+val() { $B sed -n "s/^$1 \([A-Za-z0-9-]*\)\$/\1/p" "$2" 2> /dev/null | $B head -n 1; }
+have_state() { [ -n "${APP_SLOT_TEST:-}" ] || $B grep -q " $STATE ubifs " /proc/mounts; }
+
+builtin_version() { v=$($B head -n 1 $SYS/app-version 2> /dev/null); num "$v" && echo "$v" || echo 0; }
+system_level() { v=$($B head -n 1 $SYS/system-level 2> /dev/null); num "$v" && echo "$v" || echo 0; }
+
+# The partition is read-only except while one of us writes (state-save too).
+writable() {
+    [ -n "${APP_SLOT_TEST:-}" ] && { $B mkdir -p $D; return 0; }
+    n=0
+    until $B mkdir /tmp/state-save.lock 2> /dev/null; do
+        n=$((n + 1))
+        [ $n -gt 20 ] && return 1
+        $B sleep 1
+    done
+    $B mount -o remount,rw $STATE && $B mkdir -p $D && return 0
+    $B rmdir /tmp/state-save.lock
+    return 1
+}
+readonly_again() {
+    [ -n "${APP_SLOT_TEST:-}" ] && return 0
+    $B sync
+    $B mount -o remount,ro $STATE
+    $B rmdir /tmp/state-save.lock
+}
+
+ctl_read() {
+    active=$(val active $D/app.ctl)
+    trial=$(val trial $D/app.ctl)
+    tries=$(val tries $D/app.ctl)
+    case "$active" in a | b) ;; *) active=- ;; esac
+    case "$trial" in a | b) ;; *) trial=- ;; esac
+    num "$tries" || tries=0
+}
+# Written beside and renamed: the file is the old one or the new one.
+ctl_write() {
+    { echo "active $active"; echo "trial $trial"; echo "tries $tries"; } > $D/app.ctl.new &&
+        $B sync && $B mv $D/app.ctl.new $D/app.ctl && $B sync
+}
+
+# check FILE DIR: unpack FILE's three members into DIR and judge them; sets
+# `version`. The reason for a refusal is left in `why`.
+check() {
+    why=
+    $B rm -rf "$2"
+    $B mkdir -p "$2" || { why='no room to look at it'; return 1; }
+    $B tar -x -f "$1" -C "$2" manifest manifest.sig app.zip 2> /dev/null &&
+        [ -f "$2/manifest" ] && [ -f "$2/manifest.sig" ] && [ -f "$2/app.zip" ] ||
+        { why='not a bundle'; return 1; }
+    $O dgst -sha256 -verify $SYS/update-key.pem -signature "$2/manifest.sig" "$2/manifest" 2> /dev/null |
+        $B grep -q '^Verified OK' || { why='the signature is not ours'; return 1; }
+    [ "$($B head -n 1 "$2/manifest")" = 'autotop-app 1' ] || { why='a bundle of another kind'; return 1; }
+    version=$(val version "$2/manifest")
+    needs=$(val system "$2/manifest")
+    want=$(val sha256 "$2/manifest")
+    num "$version" && num "$needs" && [ ${#want} -eq 64 ] || { why='the manifest is not complete'; return 1; }
+    got=$($O dgst -sha256 "$2/app.zip" 2> /dev/null | $B sed 's/^.*= *//')
+    [ "$got" = "$want" ] || { why='the files are not the signed ones'; return 1; }
+    [ "$needs" -le "$(system_level)" ] || { why="it needs system $needs, this is $(system_level)"; return 1; }
+    return 0
+}
+
+# Take slot $1 if it may run: unpacked under $W/tree.
+take() {
+    [ -f $D/app-$1.bundle ] || { say "no bundle is kept"; return 1; }
+    check $D/app-$1.bundle $W/check || { say "the kept bundle is not taken: $why"; return 1; }
+    [ "$version" -gt "$(builtin_version)" ] ||
+        { say "the kept bundle is not taken: version $version, the image has $(builtin_version)"; return 1; }
+    $B rm -rf $W/tree
+    $B mkdir -p $W/tree && $B unzip -o -q $W/check/app.zip -d $W/tree > /dev/null 2>&1 ||
+        { say "the kept bundle is not taken: it does not unpack"; return 1; }
+    $B chmod -R 755 $W/tree
+    [ -x $W/tree/bin/launcherd ] && [ -f $W/tree/plana-up.sh ] ||
+        { say "the kept bundle is not taken: the launcher or the session script is missing"; return 1; }
+    return 0
+}
+
+# The unpacked app over the image's copy, entry by entry (the image's other
+# things, the drivers and the decoder's libraries, stay), and whole at
+# .../app for anything a later app brings that the image has no place for.
+put_in_place() {
+    [ -n "${APP_SLOT_TEST:-}" ] && return 0
+    for t in $TARGETS; do
+        for e in $ENTRIES; do
+            [ -e $W/tree/$e ] && [ -e $t/$e ] && $B mount --bind $W/tree/$e $t/$e
+        done
+        [ -d $t/app ] && $B mount --bind $W/tree $t/app
+    done
+    return 0
+}
+
+select_app() {
+    $B mkdir -p $W || { say 'no RAM directory: the image'"'"'s own app'; return 0; }
+    echo "builtin $(builtin_version)" > $W/running
+    have_state && [ -f $D/app.ctl ] || { say "the image's own, version $(builtin_version)"; return 0; }
+    ctl_read
+    order=
+    if [ $trial != - ]; then
+        if [ $tries -gt 0 ]; then
+            tries=$((tries - 1))
+            order=$trial
+        else
+            say "the kept bundle never confirmed: dropped"
+            trial=-
+        fi
+        if writable; then ctl_write; readonly_again; else say 'the control file could not be written'; order=; fi
+    fi
+    [ $active != - ] && order="$order $active"
+    for s in $order; do
+        if take $s; then
+            put_in_place
+            echo "$s $version" > $W/running
+            [ $s = $trial ] && say "the kept bundle, version $version, on trial ($tries more)" ||
+                say "the kept bundle, version $version"
+            $B rm -rf $W/check
+            return 0
+        fi
+    done
+    $B rm -rf $W/check $W/tree
+    say "the image's own, version $(builtin_version)"
+    return 0
+}
+
+install_app() {
+    have_state || { say 'refused: this unit keeps nothing (no state partition)'; return 1; }
+    check "$1" $W/check || { say "refused: $why"; $B rm -rf $W/check; return 1; }
+    $B rm -rf $W/check
+    ctl_read
+    running=$($B sed -n 's/^[a-z]* \([0-9]*\)$/\1/p' $W/running 2> /dev/null)
+    num "$running" || running=$(builtin_version)
+    [ "$version" -gt "$running" ] || { say "refused: version $version, the unit runs $running"; return 1; }
+    slot=a
+    writable || { say 'failed: the state partition cannot be written'; return 1; }
+    # The kept bundle goes first (there is room for one): from here until the
+    # new one is in, a start would run the image's own copy.
+    active=-
+    trial=-
+    tries=0
+    ctl_write || { readonly_again; say 'failed: the control file was not written'; return 1; }
+    $B rm -f $D/app-a.bundle $D/app-a.new $D/app-b.bundle $D/app-b.new
+    $B sync
+    if $B cp "$1" $D/app-$slot.new && $B sync && check $D/app-$slot.new $W/check &&
+            $B mv $D/app-$slot.new $D/app-$slot.bundle; then
+        trial=$slot
+        tries=$TRIES
+        ctl_write && ok=1 || ok=
+    else
+        ok=
+    fi
+    $B rm -rf $W/check
+    [ -n "$ok" ] || $B rm -f $D/app-$slot.new
+    readonly_again
+    [ -n "$ok" ] || { say 'failed: the bundle could not be kept (no room?)'; return 1; }
+    say "version $version kept: it runs from the next start"
+    return 0
+}
+
+confirm_app() {
+    have_state && [ -f $D/app.ctl ] || return 0
+    ctl_read
+    [ $trial != - ] || return 0
+    [ "$($B sed -n 's/^\([ab]\) .*/\1/p' $W/running 2> /dev/null)" = $trial ] ||
+        { say "a bundle is on trial but is not what runs: left as it is"; return 1; }
+    writable || { say 'failed: the state partition cannot be written'; return 1; }
+    active=$trial
+    trial=-
+    tries=0
+    ctl_write && ok=1 || ok=
+    readonly_again
+    [ -n "$ok" ] || { say 'failed: the control file was not written'; return 1; }
+    say "version $($B sed -n 's/^[ab] \([0-9]*\)$/\1/p' $W/running) confirmed"
+    return 0
+}
+
+# A trial whose launcher never comes to say it is well would otherwise hold
+# the screen until the driver switches the car off and on, twice.
+watch_app() {
+    slot=$($B sed -n 's/^\([ab]\) .*/\1/p' $W/running 2> /dev/null)
+    [ -n "$slot" ] && have_state || return 0
+    ctl_read
+    [ "$trial" = "$slot" ] || return 0
+    $B sleep $WATCH
+    ctl_read
+    [ "$trial" = "$slot" ] || return 0
+    say "the trial has not confirmed in $WATCH s: restarting"
+    [ -n "${APP_SLOT_TEST:-}" ] && return 0
+    $B sync
+    $B reboot -f
+}
+
+status_app() {
+    echo "running $($B cat $W/running 2> /dev/null || echo "builtin $(builtin_version)")"
+    echo "builtin $(builtin_version)"
+    echo "system $(system_level)"
+    if have_state && [ -f $D/app.ctl ]; then
+        ctl_read
+        echo "active $active"
+        echo "trial $trial"
+        echo "tries $tries"
+    fi
+}
+
+case "${1:-}" in
+select) select_app ;;
+check)
+    [ -f "${2:-}" ] || { say 'refused: no file'; exit 1; }
+    $B mkdir -p $W
+    if check "$2" $W/check; then echo "ok $version"; rc=0; else say "refused: $why"; rc=1; fi
+    $B rm -rf $W/check
+    exit $rc
+    ;;
+install)
+    [ -f "${2:-}" ] || { say 'refused: no file'; exit 1; }
+    $B mkdir -p $W
+    install_app "$2"
+    ;;
+confirm) confirm_app ;;
+watch) watch_app ;;
+status) status_app ;;
+*)
+    echo 'usage: app-slot select | check FILE | install FILE | confirm | watch | status' >&2
+    exit 1
+    ;;
+esac

@@ -1,0 +1,84 @@
+AUTOTOP: ttyHS (Bluetooth) UART: 24 MHz reference as stock, enable the
+UART clock on startup, deassert RTS. Adapted from downstream linux-arkmicro
+c333fc7 and 5d795f8 (not b270e2a: stock does not clear RXD either).
+
+--- a/drivers/tty/serial/ark_hsuart.c
++++ b/drivers/tty/serial/ark_hsuart.c
+@@ -1424,6 +1424,16 @@
+ 		ucr4 &= ~(0x3F << 10);
+ 		ucr4 |= (uap->fifosize * 3 / 4) << 10;
+ 		writew(ucr4, port->membase + HSUART_UCR4);
++	} else {
++		/* The sibling ark_uart.c driver (pl011_set_mctrl(), which
++		 * works) handles both directions symmetrically via a
++		 * set/clear macro applied to every mctrl bit. This function
++		 * only ever had the assert path -- once anything called it
++		 * with TIOCM_RTS set, RTS/auto-flow-control bit 13 could
++		 * never be deasserted again through this entry point. */
++		ucr2 = readw(port->membase + HSUART_UCR2);
++		ucr2 &= ~(1 << 13);
++		writew(ucr2, port->membase + HSUART_UCR2);
+ 	}
+ }
+ 
+@@ -1458,7 +1468,43 @@
+ 		hsuart_port = 5;
+ 	}
+ 
+-	uap->port.uartclk = clk_get_rate(uap->clk);
++	/* Stock's driver hardcodes this to 24000000 directly and never
++	 * calls any clock-framework API at all (confirmed via Ghidra
++	 * decompile of ark1680_hsuart_startup, 2026-07-18) -- it doesn't
++	 * resolve this from a clk_get_rate() call the way we do. Matching
++	 * that here rather than trusting clk_get_rate(uap->clk): our own
++	 * boot log shows every other registered clock printing its
++	 * resolved rate via clk_sys_recalc_rate()'s banner (cpupll,
++	 * uart4clk, uart5clk, etc.) except hsuart0clk/hsuart1clk, which
++	 * never print at all, anywhere in any capture -- strong evidence
++	 * this call was returning something other than the correct 24MHz
++	 * for the two high-speed UART ports specifically (the two-parent
++	 * "arkmicro,ark-clk-sys" clocks, unlike their single-parent uart4/
++	 * uart5clk siblings which do print correctly). A wrong uartclk
++	 * here means every UBMR baud divisor for both ttyHS0 (MCU) and
++	 * ttyHS1 (Bluetooth) would be computed wrong -- mistimed
++	 * bit-level UART signaling that looks exactly like "the
++	 * peripheral never responds", identically on both ports, which
++	 * matches the symptom this was found while investigating. */
++	uap->port.uartclk = 24000000;
++
++	/* uap->clk (uart4clk/uart5clk) is fetched in probe() via
++	 * devm_clk_get() but was never actually turned on anywhere in this
++	 * driver -- no clk_prepare_enable() call existed at all, in probe()
++	 * or here. clk-sys.c's clk_sys_ops has real .enable/.disable
++	 * callbacks that write an actual gate-enable bit to a system
++	 * register (not a no-op rate-only clock), and the sibling
++	 * ark_uart.c driver (ttyS0-3, which works) does call
++	 * clk_prepare_enable() in its own startup(). With nothing ever
++	 * enabling it, Linux's common clock framework's boot-time
++	 * "disable unused clocks" pass would gate this off outright --
++	 * these ports are only ever opened later by userspace
++	 * (blueware/MsnCoreApp), long after that pass runs, so the HS UART
++	 * peripheral could be sitting on a genuinely disabled clock the
++	 * entire time anything tries to talk over it. */
++	retval = clk_prepare_enable(uap->clk);
++	if (retval)
++		return retval;
+ 
+ 	/* Clear pending error and receive interrupts */
+ 	ark_hsuart_clear_interrupt(uap, HSUART_INT_RXD | HSUART_INT_RXTIMEOUT |
+@@ -1507,6 +1553,7 @@
+ 	return 0;
+ 
+  clk_dis:
++	clk_disable_unprepare(uap->clk);
+ 	return retval;
+ }
+ 
+@@ -1547,6 +1594,7 @@
+ 	/*
+ 	 * Shut down the clock producer
+ 	 */
++	clk_disable_unprepare(uap->clk);
+ }
+ 
+ static void

@@ -1,0 +1,142 @@
+--- a/buildroot-external/package/libarkapi/software/src/ark_video.c
++++ b/buildroot-external/package/libarkapi/software/src/ark_video.c
+@@ -688,8 +688,8 @@
+     unsigned long usetime = 0;
+ 	int ret;
+ 
+-	if(!handle){
+-		printf("%s: handle null, error.\n", __func__);
++	if (!handle || !src_addr || len <= 0) {
++		printf("%s: invalid frame input.\n", __func__);
+ 		return -EINVAL;
+ 	}
+ 	if(!handle->handle_mfc || !handle->handle_mem
+@@ -789,8 +789,8 @@
+     unsigned long usetime = 0;
+ 	int ret;
+ 
+-	if(!handle){
+-		printf("%s: handle null, error.\n", __func__);
++	if (!handle || !src_addr || len <= 0) {
++		printf("%s: invalid frame input.\n", __func__);
+ 		return -EINVAL;
+ 	}
+ 	if(!handle->handle_mfc || !handle->handle_mem
+@@ -894,8 +894,8 @@
+ 	int ret;
+ 	static int seek_flag = 0, seek_finsh = 0, seek_cnt = 0;
+ 
+-	if(!handle){
+-		printf("%s: handle null, error.\n", __func__);
++	if (!handle || !src_addr || len <= 0) {
++		printf("%s: invalid frame input.\n", __func__);
+ 		return -EINVAL;
+ 	}
+ 	if(!handle->handle_mfc || !handle->handle_mem
+--- a/u-boot/arch/arm/mach-arkmicro/armv7/ark_common.c
++++ b/u-boot/arch/arm/mach-arkmicro/armv7/ark_common.c
+@@ -146,7 +146,13 @@
+ 	ret = run_command(cmd, 0);
+ 	if(ret)
+ 		return 1;
+-	file_size = env_get_ulong("filesize", 16, 0x2000);
++	file_size = env_get_ulong("filesize", 16, 0);
++	/* Seven CRC words are required; remaining words are reserved. */
++	if (!srcdata || file_size < sizeof(sys_info) - sizeof(sys_info.reserve) ||
++	    file_size > sizeof(sys_info) || file_size % sizeof(sys_info.uboot_crc)) {
++		printf("Invalid CRC metadata size or load address\n");
++		return 1;
++	}
+ 	memcpy(&sys_info, srcdata, file_size);
+ //	printf("uboot_crc 		  = 0x%x\n",sys_info.uboot_crc);
+ //	printf("fdt_crc			  = 0x%x\n",sys_info.fdt_crc);
+--- a/u-boot/board/arkmicro/ark1668e_devb/ark1668e_devb.c
++++ b/u-boot/board/arkmicro/ark1668e_devb/ark1668e_devb.c
+@@ -349,7 +349,8 @@
+ 	}
+ 	update_fdt = env_get("boardfdt");
+ 	printf("update_fdt:%s\n", update_fdt);
+-	get_crc_data_from_device("crcdata.bin");
++	if (get_crc_data_from_device("crcdata.bin"))
++		goto bootoldsys;
+ 	dis_pos_x = 6;
+ 	dis_pos_y = 20;
+ 	ret = ark_update_bootstrap("bootstrap", "ubootspl.bin");
+--- a/u-boot/board/arkmicro/ark1668e_devb_dashboard/ark1668e_devb_dashboard.c
++++ b/u-boot/board/arkmicro/ark1668e_devb_dashboard/ark1668e_devb_dashboard.c
+@@ -348,7 +348,8 @@
+ 	}
+ 	update_fdt = env_get("boardfdt");
+ 	printf("update_fdt:%s\n", update_fdt);
+-	get_crc_data_from_device("crcdata.bin");
++	if (get_crc_data_from_device("crcdata.bin"))
++		goto bootoldsys;
+ 	dis_pos_x = 6;
+ 	dis_pos_y = 20;
+ 	ret = ark_update_bootstrap("bootstrap", "ubootspl.bin");
+--- a/u-boot/board/arkmicro/ark1668e_devb_emmc/ark1668e_devb_emmc.c
++++ b/u-boot/board/arkmicro/ark1668e_devb_emmc/ark1668e_devb_emmc.c
+@@ -320,7 +320,8 @@
+ 	mdelay(20);
+ //	update_fdt = env_get("boardfdt");
+ //	sprintf(update_fdt_name, "%s", env_get("boardfdt"));
+-	get_crc_data_from_device("crcdata.bin");
++	if (get_crc_data_from_device("crcdata.bin"))
++		goto bootoldsys;
+ 	dis_pos_x = 6;
+ 	dis_pos_y = 20;
+ //****** update from update ubootspl******
+--- a/u-boot/cmd/emmc.c
++++ b/u-boot/cmd/emmc.c
+@@ -791,7 +791,13 @@
+ 	ret = run_command(cmd, 0);
+ 	if(ret)
+ 		return 1;
+-	file_size = env_get_ulong("filesize", 16, 0x2000);
++	file_size = env_get_ulong("filesize", 16, 0);
++	/* Seven CRC words are required; remaining words are reserved. */
++	if (!srcdata || file_size < sizeof(sys_info) - sizeof(sys_info.reserve) ||
++	    file_size > sizeof(sys_info) || file_size % sizeof(sys_info.uboot_crc)) {
++		printf("Invalid CRC metadata size or load address\n");
++		return 1;
++	}
+ 	memcpy(&sys_info, srcdata, file_size);
+ //	printf("uboot_crc 		  = 0x%x\n",sys_info.uboot_crc);
+ //	printf("fdt_crc			  = 0x%x\n",sys_info.fdt_crc);
+@@ -864,7 +870,8 @@
+ 	mdelay(20);
+ 	sprintf((char *)cmd,"disconfig 0");
+ 	run_command(cmd, 0);
+-	get_crc_data_from_ota("crcdata.bin");
++	if (get_crc_data_from_ota("crcdata.bin"))
++		goto bootoldsys;
+ 
+ 	dis_pos_x = 6;
+ 	dis_pos_y = 20;
+--- a/u-boot/cmd/update_cmd.c
++++ b/u-boot/cmd/update_cmd.c
+@@ -85,7 +85,13 @@
+ 	ret = run_command(cmd, 0);
+ 	if(ret)
+ 		return 1;
+-	file_size = env_get_ulong("filesize", 16, 0x2000);
++	file_size = env_get_ulong("filesize", 16, 0);
++	/* Seven CRC words are required; remaining words are reserved. */
++	if (!srcdata || file_size < sizeof(sys_info) - sizeof(sys_info.reserve) ||
++	    file_size > sizeof(sys_info) || file_size % sizeof(sys_info.uboot_crc)) {
++		printf("Invalid CRC metadata size or load address\n");
++		return 1;
++	}
+ 	memcpy(&sys_info, srcdata, file_size);
+ 
+ 	printf("uboot_crc 		  = 0x%x\n",sys_info.uboot_crc);
+@@ -138,7 +144,8 @@
+ 	  }
+     sprintf((char *)cmd,"disconfig 10");
+     run_command(cmd, 0);
+-	get_crc_data_from_ota("crcdata.bin");
++	if (get_crc_data_from_ota("crcdata.bin"))
++		goto bootoldsys;
+ 	dis_pos_x = 6;
+ 	dis_pos_y = 20;
+ 	printf("\r\n *****Now update ubootspl.bin ......\r\n");

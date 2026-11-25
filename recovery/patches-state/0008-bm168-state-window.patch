@@ -1,0 +1,179 @@
+diff --git a/drivers/mtd/nand/raw/ark_nand.c b/drivers/mtd/nand/raw/ark_nand.c
+index 420c5fc..42f95fc 100644
+--- a/drivers/mtd/nand/raw/ark_nand.c
++++ b/drivers/mtd/nand/raw/ark_nand.c
+@@ -117,8 +117,19 @@ struct ark_nfc {
+ 	bool writer_cmd;	/* write-class commands permitted for this sequence */
+ 	bool writer_fault;	/* a data transfer was refused; never PAGEPROG */
+ 	unsigned long erases, programs, rejects;
++	/*
++	 * AUTOTOP state window: at run time the stock userdata partition, and
++	 * nothing else, may be erased and programmed (UBI/UBIFS), once armed
++	 * through sysfs. Pages go out in stock format, the parity made here.
++	 */
++	bool state_present;
++	bool state_armed;
+ };
+ 
++/* The stock userdata partition: the only state window there is. */
++#define ARK_STATE_START	0x07260000ULL
++#define ARK_STATE_SIZE	0x00600000ULL
++
+ #define ARK_WRITER_PROG_TIMEOUT_US	5000
+ #define ARK_WRITER_ERASE_TIMEOUT_US	20000
+ 
+@@ -738,9 +749,19 @@ static void ark_nfc_write_buf(struct mtd_info *mtd, const uint8_t *buf, int len)
+ 	}
+ }
+ 
++static bool ark_state_contains(u64 addr, u64 len)
++{
++	return len && addr >= ARK_STATE_START &&
++	       addr - ARK_STATE_START <= ARK_STATE_SIZE &&
++	       len <= ARK_STATE_SIZE - (addr - ARK_STATE_START);
++}
++
+ static bool ark_writer_allowed(struct ark_nfc *nfc, u64 addr, u64 len,
+ 			       const char *op)
+ {
++	if (nfc->state_present && READ_ONCE(nfc->state_armed) &&
++	    ark_state_contains(addr, len))
++		return true;
+ 	if (nfc->window_present && READ_ONCE(nfc->armed) &&
+ 	    bm168_window_contains(nfc->window_start, nfc->window_size, addr, len))
+ 		return true;
+@@ -839,10 +860,32 @@ static int ark_writer_erase(struct mtd_info *mtd, int page)
+ 		return ret;
+ 	}
+ 	nfc->erases++;
+-	dev_info(nfc->dev, "AUTOTOP writer erased 0x%llx\n", addr);
++	if (nfc->window_present)	/* the installer's log; UBI erases as it likes */
++		dev_info(nfc->dev, "AUTOTOP writer erased 0x%llx\n", addr);
+ 	return 0;
+ }
+ 
++/*
++ * A page for the state window. The caller gives the main area only (UBI and
++ * UBIFS never pass OOB); the stock parity is made here, and the page goes out
++ * through the raw writer, which checks address and format once more.
++ */
++static int ark_state_write_page(struct mtd_info *mtd, struct nand_chip *chip,
++				const uint8_t *buf, int oob_required, int page)
++{
++	struct ark_nfc *nfc = to_ark_nfc(chip);
++	u64 addr = (u64)page << chip->page_shift;
++
++	if (oob_required || !nfc->state_present ||
++	    !ark_state_contains(addr, mtd->writesize)) {
++		nfc->rejects++;
++		dev_err(nfc->dev, "AUTOTOP state: rejected page at 0x%llx\n", addr);
++		return -EROFS;
++	}
++	bm168_page_oob(buf, chip->oob_poi);
++	return ark_writer_write_page_raw(mtd, chip, buf, 1, page);
++}
++
+ static int ark_writer_refuse_oob(struct mtd_info *mtd, struct nand_chip *chip, int page)
+ {
+ 	return -EROFS;
+@@ -887,6 +930,40 @@ static ssize_t autotop_writer_store(struct device *dev, struct device_attribute
+ }
+ static DEVICE_ATTR_RW(autotop_writer);
+ 
++static ssize_t autotop_state_show(struct device *dev, struct device_attribute *attr,
++				  char *buf)
++{
++	struct ark_nfc *nfc = dev_get_drvdata(dev);
++
++	return sprintf(buf, "window=0x%llx+0x%llx armed=%d erases=%lu programs=%lu rejects=%lu\n",
++		       ARK_STATE_START, ARK_STATE_SIZE, READ_ONCE(nfc->state_armed),
++		       nfc->erases, nfc->programs, nfc->rejects);
++}
++
++/* "arm 7260000 600000": the window, said in full; "disarm" always works. */
++static ssize_t autotop_state_store(struct device *dev, struct device_attribute *attr,
++				   const char *buf, size_t count)
++{
++	struct ark_nfc *nfc = dev_get_drvdata(dev);
++	unsigned long long start, size;
++	char verb[8];
++
++	if (sscanf(buf, "%7s", verb) != 1)
++		return -EINVAL;
++	if (!strcmp(verb, "disarm")) {
++		WRITE_ONCE(nfc->state_armed, false);
++		dev_info(dev, "AUTOTOP state window disarmed\n");
++		return count;
++	}
++	if (strcmp(verb, "arm") || sscanf(buf, "%*s %llx %llx", &start, &size) != 2 ||
++	    start != ARK_STATE_START || size != ARK_STATE_SIZE)
++		return -EINVAL;
++	WRITE_ONCE(nfc->state_armed, true);
++	dev_info(dev, "AUTOTOP state window ARMED: userdata 0x%llx+0x%llx\n", start, size);
++	return count;
++}
++static DEVICE_ATTR_RW(autotop_state);
++
+ static int ark_nand_chip_init(struct device *dev, struct ark_nfc *nfc)
+ {
+ 	struct mtd_info *mtd;
+@@ -897,7 +974,7 @@ static int ark_nand_chip_init(struct device *dev, struct ark_nfc *nfc)
+ 
+ 	nand->chip_delay = 100;
+ 	nand->options |= NAND_SKIP_BBTSCAN;
+-	if (!nfc->window_present)
++	if (!nfc->window_present && !nfc->state_present)
+ 		nand->options |= NAND_ROM;
+ 	nand->controller = &nfc->controller;
+ 	/*
+@@ -938,6 +1015,9 @@ static int ark_nand_chip_init(struct device *dev, struct ark_nfc *nfc)
+ 	if (nfc->window_present) {
+ 		dev_info(dev, "AUTOTOP bounded writer: window 0x%llx+0x%llx, DISARMED, stock-format raw pages only\n",
+ 			 nfc->window_start, nfc->window_size);
++	} else if (nfc->state_present) {
++		dev_info(dev, "AUTOTOP state window: userdata 0x%llx+0x%llx, DISARMED; everything else read-only\n",
++			 ARK_STATE_START, ARK_STATE_SIZE);
+ 	} else {
+ 		mtd->flags &= ~MTD_WRITEABLE;
+ 		dev_info(dev, "AUTOTOP NAND read-only: ROM, no BBT scan, command guard active\n");
+@@ -977,6 +1057,7 @@ static int ark_nand_attach_chip(struct nand_chip *nand)
+ 	nand->erase = ark_writer_erase;
+ 	nand->block_markbad = ark_writer_refuse_markbad;
+ 	nand->ecc.write_page_raw = ark_writer_write_page_raw;
++	nand->ecc.write_page = ark_state_write_page;
+ 	nand->ecc.write_subpage = NULL;
+ 	nand->ecc.write_oob = ark_writer_refuse_oob;
+ 	nand->ecc.write_oob_raw = ark_writer_refuse_oob;
+@@ -1023,6 +1104,18 @@ static int ark_nfc_probe(struct platform_device *pdev)
+ 		nfc->window_start = w[0];
+ 		nfc->window_size = w[1];
+ 	}
++	if (of_find_property(np, "autotop,state-window", NULL)) {
++		u32 w[2];
++
++		/* One window, said in full; never together with the installer's. */
++		if (of_property_read_u32_array(np, "autotop,state-window", w, 2) ||
++		    w[0] != ARK_STATE_START || w[1] != ARK_STATE_SIZE ||
++		    nfc->window_present) {
++			dev_err(dev, "AUTOTOP state: invalid state window\n");
++			return -EINVAL;
++		}
++		nfc->state_present = true;
++	}
+ 
+ 	nfc->regs = of_iomap(np, 0);
+ 	if (IS_ERR(nfc->regs))
+@@ -1055,6 +1148,13 @@ static int ark_nfc_probe(struct platform_device *pdev)
+ 			return ret;
+ 		}
+ 	}
++	if (nfc->state_present) {
++		ret = device_create_file(dev, &dev_attr_autotop_state);
++		if (ret) {
++			ark_nand_chips_cleanup(nfc);
++			return ret;
++		}
++	}
+ 
+ 	return 0;
+ }

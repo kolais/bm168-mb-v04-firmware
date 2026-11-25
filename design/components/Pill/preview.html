@@ -1,0 +1,19 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../../tokens.css"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap"><style>
+*{box-sizing:border-box}html,body{margin:0}
+body{background:var(--ground);color:var(--ink);font-family:var(--font-sans);font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased}
+.eyebrow-20{text-transform:uppercase}
+svg.i{width:var(--icon);height:var(--icon);fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex:none}
+
+.pill{height:var(--pill-h);padding:0 var(--space-5);border-radius:var(--radius-pill);display:inline-flex;align-items:center;gap:var(--space-2);background:var(--surface-raised);color:var(--ink);box-shadow:var(--edge-light);white-space:nowrap}
+.pill.primary{background:var(--blue);color:var(--on-blue)}
+.pill.focus{outline:var(--ring) solid var(--amber);outline-offset:var(--space-1)}
+.pill.off{background:rgba(0,0,0,0);box-shadow:none;border:1px solid var(--outline);color:var(--ink-faint)}
+.status{height:40px;padding:0 var(--space-3);border-radius:var(--radius-pill);display:inline-flex;align-items:center;gap:var(--space-2);background:var(--surface-raised);color:var(--ink);white-space:nowrap}
+.status i{width:12px;height:12px;border-radius:6px;background:var(--green);flex:none}
+.status.warn i{background:var(--yellow);border-radius:2px;transform:rotate(45deg)}
+.status.bad i{background:var(--red);border-radius:0}
+.status.idle i{background:rgba(0,0,0,0);border:2px solid var(--outline)}
+.wrap{padding:var(--space-5);display:flex;flex-direction:column;gap:var(--space-5)}.r{display:flex;gap:var(--space-4);align-items:center;flex-wrap:wrap}</style></head><body><div class="wrap">
+<div class="r"><span class="pill primary focus label-20">Open CarPlay</span><span class="pill primary label-20">Open CarPlay</span><span class="pill label-20">Choose another phone</span><span class="pill off label-20">Pair</span></div>
+<div class="r"><span class="status label-20"><i></i>Connected</span><span class="status warn label-20"><i></i>Connecting</span><span class="status bad label-20"><i></i>Unreachable</span><span class="status idle label-20"><i></i>Not paired</span></div>
+</div></body></html>

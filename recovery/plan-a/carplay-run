@@ -1,0 +1,18 @@
+#!/bin/sh
+# carplay as D-Bus starts it: the image's com.arkmicro.carplay.service names
+# this file instead of /usr/bin/carplay. carplay reads its names once, when
+# its process starts (docs/launcher-bench-stage2.md, "The unit's name"), so
+# the name the driver gave the unit, if there is one, is put in its
+# environment here: the accessory's, the vehicle's and the label under the
+# car's icon in CarPlay. Without the file stock's own names stand.
+# The icon itself is the owner's (design/assets/carplay-icon@2x.png). A phone
+# takes name and icon when it is paired: one that already knows the unit
+# shows the new icon after "Forget This Car" on the phone and a new pairing,
+# and the new name in its CarPlay settings if the phone is also restarted
+# before that pairing (bench, 2026-11-23).
+if [ -s /data/autotop-name ]; then
+    IFS= read -r n < /data/autotop-name
+    [ -n "$n" ] && export CARPLAY_NAME="$n" CARPLAY_VEHICLE_NAME="$n" CARPLAY_OEM_ICON_LABEL="$n"
+fi
+[ -s /opt/autotop/carplay-icon.png ] && export CARPLAY_OEM_ICON_PATH=/opt/autotop/carplay-icon.png
+exec /usr/bin/carplay

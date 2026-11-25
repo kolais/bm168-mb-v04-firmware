@@ -1,0 +1,31 @@
+#!/bin/sh
+# Keep what was changed on the unit: /data (settings, CarPlay's keychain) and
+# the Bluetooth pairing list, as one archive on the stock userdata partition
+# (/mnt/state, mounted by init-b; recovery/patches-state). The partition is
+# read-only except while this runs. The archive is written beside the old
+# one, read back, and only then put in its place; the one before stays as
+# state.old, so a power cut at any point leaves an archive that reads.
+#
+# Exit 0 saved, 1 no state partition, 2 another save is running, 3 failed.
+B=/bin/busybox
+R=/mnt/stock
+D=/mnt/state/autotop
+say() { echo "state-save: $*"; }
+
+$B grep -q ' /mnt/state ubifs ' /proc/mounts || { say 'no state partition'; exit 1; }
+$B mkdir /tmp/state-save.lock 2> /dev/null || { say 'another save is running'; exit 2; }
+trap '$B mount -o remount,ro /mnt/state; $B rmdir /tmp/state-save.lock' EXIT
+
+files=data
+for f in etc/goc/bt_conf.ini etc/goc/sc_db.db etc/goc/config.ini etc/driverDirection; do
+    [ -f $R/$f ] && files="$files $f"
+done
+$B mount -o remount,rw /mnt/state || { say 'remount failed'; exit 3; }
+$B mkdir -p $D &&
+    $B tar -c -f $D/state.new -C $R $files &&
+    $B sync &&
+    $B tar -t -f $D/state.new > /dev/null || { say 'archive not written'; $B rm -f $D/state.new; exit 3; }
+[ -f $D/state.tar ] && $B mv $D/state.tar $D/state.old
+$B mv $D/state.new $D/state.tar && $B sync || { say 'archive not put in place'; exit 3; }
+say "saved ($($B wc -c < $D/state.tar) bytes)"
+exit 0

@@ -1,0 +1,20 @@
+--- a/hal/hal_com.c	2026-11-18 00:58:41
++++ b/hal/hal_com.c	2026-11-18 00:58:41
+@@ -2011,10 +2011,15 @@
+ 	if ((psta->wireless_mode & WIRELESS_11G) || (psta->wireless_mode & WIRELESS_11A))
+ 		w_set |= WIRELESS_OFDM;
+ 
+-	if (psta->wireless_mode & WIRELESS_11_24N)
++	/* AUTOTOP: a 5 GHz HT-only station (WIRELESS_11_5N) must get the HT set,
++	 * not VHT. With VHT, phydm picks the AC rate table (raid 10, VHT_1SS) and
++	 * unicast data reaches HT-only clients as VHT frames they drop, while
++	 * beacons, management and broadcast frames still work (BM168 AP test,
++	 * docs/plan-a-peripheral-spike.md). VHT only for 802.11ac stations. */
++	if ((psta->wireless_mode & WIRELESS_11_24N) || (psta->wireless_mode & WIRELESS_11_5N))
+ 		w_set |= WIRELESS_HT;
+ 
+-	if ((psta->wireless_mode & WIRELESS_11AC) || (psta->wireless_mode & WIRELESS_11_5N))
++	if (psta->wireless_mode & WIRELESS_11AC)
+ 		w_set |= WIRELESS_VHT;
+ 
+ 	psta->cmn.support_wireless_set = w_set;

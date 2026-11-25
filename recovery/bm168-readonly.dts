@@ -1,0 +1,110 @@
+// SPDX-License-Identifier: GPL-2.0
+// Read-only storage additions to the proven RAM console platform.
+#include "bm168-console.dts"
+/ {
+    model = "BM168 read-only storage recovery";
+    aliases { usb0 = &usb0; usb1 = &usb1; gpio0 = &gpio0; gpio3 = &gpio3; };
+    ahb {
+        restart@e4b00000 {
+            compatible = "autotop,bm168-restart";
+            reg = <0xe4b00000 0x20>;
+            clocks = <&pclk>;
+        };
+        gpio0: gpio@e4600000 {
+            compatible = "arkmicro,ark-gpio";
+            reg = <0xe4600000 0x20>;
+            interrupt-parent = <&vicl>;
+            interrupts = <1>;
+            gpio-controller;
+            #gpio-cells = <2>;
+            // Inherit bootloader pinmux; no gpio-ranges or pinctrl writes.
+        };
+        gpio3: gpio@e4600060 {
+            compatible = "arkmicro,ark-gpio";
+            reg = <0xe4600060 0x20>;
+            interrupt-parent = <&vicl>;
+            interrupts = <1>;
+            gpio-controller;
+            #gpio-cells = <2>;
+            // Inherit bootloader pinmux; no gpio-ranges or pinctrl writes.
+        };
+
+        nfc: nand@ec000000 {
+            compatible = "arkmicro,ark-nand";
+            reg = <0xec000000 0x1000>;
+            max-chips = <1>;
+            interrupt-parent = <&vicl>;
+            interrupts = <16>;
+            nand-bus-width = <8>;
+            nand-ecc-mode = "hw_syndrome";
+            // No nand-on-flash-bbt: the recovery driver rejects it as well.
+            partitions {
+                compatible = "fixed-partitions";
+                #address-cells = <1>;
+                #size-cells = <1>;
+                partition@0 { label = "S-Loader"; reg = <0x0 0x20000>; read-only; };
+                partition@20000 { label = "U-boot"; reg = <0x20000 0x80000>; read-only; };
+                partition@a0000 { label = "U-boot-Env"; reg = <0xa0000 0x40000>; read-only; };
+                partition@e0000 { label = "U-boot-Env_Back"; reg = <0xe0000 0x40000>; read-only; };
+                partition@120000 { label = "arkdata"; reg = <0x120000 0x40000>; read-only; };
+                partition@160000 { label = "kernel"; reg = <0x160000 0x400000>; read-only; };
+                partition@560000 { label = "rootfs"; reg = <0x560000 0x6d00000>; read-only; };
+                partition@7260000 { label = "userdata"; reg = <0x7260000 0x600000>; read-only; };
+                partition@7860000 { label = "bootlogo"; reg = <0x7860000 0x80000>; read-only; };
+                partition@78e0000 { label = "bootanimation"; reg = <0x78e0000 0x200000>; read-only; };
+                partition@7ae0000 { label = "reversingtrack"; reg = <0x7ae0000 0x200000>; read-only; };
+                partition@7ce0000 { label = "Unicode"; reg = <0x7ce0000 0x40000>; read-only; };
+                partition@7d20000 { label = "Private"; reg = <0x7d20000 0x20000>; read-only; };
+                partition@7d40000 { label = "unexposed-tail"; reg = <0x7d40000 0x2c0000>; read-only; };
+            };
+        };
+        usb0_phy: usb0-phy {
+            compatible = "usb-nop-xceiv";
+            #phy-cells = <0>;
+        };
+        usb1_phy: usb1-phy {
+            compatible = "usb-nop-xceiv";
+            #phy-cells = <0>;
+        };
+        usb0: usb@e0100000 {
+            compatible = "arkmicro,ark-musb";
+            reg = <0xe0100000 0x1000 0xe4900000 0x1000>;
+            reg-names = "system", "control";
+            interrupt-parent = <&vicl>;
+            interrupts = <14>, <13>;
+            interrupt-names = "mc", "dma";
+            dr_mode = "host";
+            multipoint = <1>;
+            num-eps = <6>;
+            ram-bits = <12>;
+            maximum-speed = "high-speed";
+            power = <500>;
+            phys = <&usb0_phy>;
+            // Keep the working VBUS/ID pin state established by U-Boot.
+            gpio-id = <0xffffffff>;
+            gpio-pwr = <0xffffffff>;
+            sys-softrest-regoffset = <0x74>;
+            usb-softrest-bitoffset = <5>;
+        };
+        usb1: usb@e0400000 {
+            compatible = "arkmicro,ark-musb";
+            reg = <0xe0400000 0x1000 0xe4900000 0x1000>;
+            reg-names = "system", "control";
+            interrupt-parent = <&vich>;
+            interrupts = <8>, <7>;
+            interrupt-names = "mc", "dma";
+            dr_mode = "host";
+            multipoint = <1>;
+            num-eps = <6>;
+            ram-bits = <12>;
+            maximum-speed = "high-speed";
+            power = <500>;
+            phys = <&usb1_phy>;
+            gpio-id = <1>;
+            gpio-pwr = <117>;
+            autotop,stock-host-startup;
+            sys-softrest-regoffset = <0x78>;
+            usb-softrest-bitoffset = <6>;
+        };
+    };
+};

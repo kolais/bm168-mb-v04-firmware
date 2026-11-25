@@ -1,0 +1,25 @@
+#!/bin/sh
+# Join this Mac's Wi-Fi to the unit's network, for tools/unit-ssh
+# (docs/developer-access.md). macOS leaves a network without internet for a
+# known one that has it, so after every restart of the unit it needs telling.
+#
+# The network's name is not written anywhere here: it is found among the
+# Mac's known networks by a hash of it (~/.config/bm168-mb-v04/unit-wifi.hash,
+# sha256 of the name), and the passphrase comes from the keychain, where the
+# Mac put it when the network was first joined by hand. That works for as
+# long as the passphrase stays: while "Developer access" is on.
+H=${AUTOTOP_WIFI_HASH:-$HOME/.config/bm168-mb-v04/unit-wifi.hash}
+i=${AUTOTOP_WIFI_IF:-en0}
+[ -s "$H" ] || { echo "no $H (sha256 of the unit's network name)"; exit 2; }
+W=$(cat "$H")
+on_unit() { case "$(ifconfig $i | awk '/inet /{print $2}')" in 192.168.43.*) return 0 ;; esac; return 1; }
+on_unit && { echo 'already on the unit'; exit 0; }
+networksetup -listpreferredwirelessnetworks $i | sed 1d | sed 's/^[[:space:]]*//' | while IFS= read -r n; do
+    [ "$(printf %s "$n" | shasum -a 256 | cut -c1-64)" = "$W" ] && networksetup -setairportnetwork $i "$n" > /dev/null 2>&1
+done
+for k in 1 2 3 4 5 6 7 8 9 10; do
+    on_unit && { echo 'joined the unit'; exit 0; }
+    sleep 2
+done
+echo "NOT on the unit (is it on, is Developer access on, was the network joined by hand once since?)"
+exit 1

@@ -1,0 +1,25 @@
+// SPDX-License-Identifier: GPL-2.0
+// Plan A option B: kernel from the NAND kernel partition (stock U-Boot's
+// nandboot, unchanged), root = the Plan A squashfs in UBI volume 0 of the
+// rootfs partition, read through ubiblock. UBI attaches read-only because
+// every partition is read-only here (bm168-readonly.dts) and the NAND driver
+// blocks erase/program. No initramfs: init is the image's /opt/autotop/init-b.
+#include "bm168-spike.dts"
+/ {
+    model = "BM168 Plan A option B (NAND root, read-only)";
+    chosen {
+        bootargs = "console=ttyS0,115200n8 earlyprintk mem=180M cma=0 clk_ignore_unused panic=0 ubi.mtd=rootfs ubi.block=0,0 root=/dev/ubiblock0_0 rootfstype=squashfs ro rootwait init=/opt/autotop/init-b";
+    };
+};
+#ifdef STATE_WINDOW
+// The state window (recovery/patches-state): the stock userdata partition,
+// and nothing else, may be erased and programmed at run time. The driver
+// holds the same window and starts disarmed; init-b arms it before UBI
+// attaches. Every other partition keeps its read-only flag.
+&nfc {
+    autotop,state-window = <0x7260000 0x600000>;
+    partitions {
+        partition@7260000 { /delete-property/ read-only; };
+    };
+};
+#endif

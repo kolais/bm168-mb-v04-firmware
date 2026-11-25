@@ -1,0 +1,62 @@
+AUTOTOP: optional short spin before sleeping in mmc_wait_for_req_done(),
+run-time parameter, off by default (CarPlay CPU experiment: avoid two
+context switches per fast SDIO request). Counters spin_hits/spin_misses.
+
+--- a/drivers/mmc/core/core.c
++++ b/drivers/mmc/core/core.c
+@@ -46,6 +46,47 @@
+ #include "sdio_bus.h"
+ #include "pwrseq.h"
+ 
++/*
++ * AUTOTOP: optional short spin before sleeping on a request's completion
++ * (CarPlay CPU experiment). On this single-core SoC the completion interrupt
++ * and the host tasklet still run while the caller spins, so a fast request
++ * (an SDIO CMD52, a small CMD53) completes without the caller sleeping and
++ * being woken again (two context switches). Off by default; set at run time:
++ *   /sys/module/mmc_core/parameters/spin_us         spin budget, 0 = off
++ *   /sys/module/mmc_core/parameters/spin_max_bytes  only data requests up to
++ *                                                   this size (no-data
++ *                                                   commands always qualify)
++ * spin_hits / spin_misses count requests completed within / after the spin.
++ */
++static unsigned int spin_us;
++module_param(spin_us, uint, 0644);
++static unsigned int spin_max_bytes = 512;
++module_param(spin_max_bytes, uint, 0644);
++static unsigned int spin_hits, spin_misses;
++module_param(spin_hits, uint, 0444);
++module_param(spin_misses, uint, 0444);
++
++static void mmc_spin_for_completion(struct mmc_request *mrq)
++{
++	unsigned int us = READ_ONCE(spin_us);
++	ktime_t end;
++
++	if (!us)
++		return;
++	if (mrq->data &&
++	    mrq->data->blksz * mrq->data->blocks > READ_ONCE(spin_max_bytes))
++		return;
++	end = ktime_add_us(ktime_get(), us);
++	while (!completion_done(&mrq->completion)) {
++		if (ktime_after(ktime_get(), end)) {
++			spin_misses++;
++			return;
++		}
++		cpu_relax();
++	}
++	spin_hits++;
++}
++
+ #include "mmc_ops.h"
+ #include "sd_ops.h"
+ #include "sdio_ops.h"
+@@ -402,6 +443,7 @@
+ 	struct mmc_command *cmd;
+ 
+ 	while (1) {
++		mmc_spin_for_completion(mrq);
+ 		wait_for_completion(&mrq->completion);
+ 
+ 		cmd = mrq->cmd;

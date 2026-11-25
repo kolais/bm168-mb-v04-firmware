@@ -1,0 +1,31 @@
+#!/bin/sh
+# Option B rehearsal (RAM, no NAND filesystem): mount the Plan A squashfs
+# named in PLANA.CFG (SQF=) from the U DISK stick read-only and hand over to
+# the image's own init, /opt/autotop/init-b, as option B's kernel does from
+# the NAND UBI volume. The vendor BusyBox has no switch_root; chroot keeps
+# this shell's PID 1 for the image's init.
+/bin/busybox mount -t proc proc /proc
+/bin/busybox mount -t sysfs sysfs /sys
+/bin/busybox mount -t devtmpfs devtmpfs /dev
+exec </dev/console >/dev/console 2>&1
+echo 'Plan A option B rehearsal: squashfs root from the U DISK stick; NAND read-only.'
+mode=/sys/bus/platform/devices/musb-hdrc.1/mode
+if test -w "$mode"; then
+    echo host > "$mode" || echo 'U DISK host startup failed'
+fi
+count=0
+while ! test -b /dev/sda1 && test "$count" -lt 20; do
+    /bin/busybox sleep 1
+    count=$((count + 1))
+done
+test -b /dev/sda1 && /bin/busybox mount -t vfat -o ro,nosuid,nodev,noexec /dev/sda1 /mnt/usb
+sqf=$(/bin/busybox sed -n 's/^SQF=\([A-Za-z0-9._]*\)\r*$/\1/p' /mnt/usb/PLANA.CFG 2>/dev/null | /bin/busybox head -1)
+if test -n "$sqf" && /bin/busybox mount -t squashfs -o loop,ro "/mnt/usb/$sqf" /newroot &&
+        test -x /newroot/opt/autotop/init-b; then
+    echo "rehearsal root: $sqf"
+    exec /bin/busybox chroot /newroot /opt/autotop/init-b
+fi
+echo "rehearsal: no usable squashfs (SQF=${sqf:-unset}); shell only"
+while :; do
+    /bin/sh -i
+done

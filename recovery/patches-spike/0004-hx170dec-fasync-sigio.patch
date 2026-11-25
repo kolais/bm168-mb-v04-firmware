@@ -1,0 +1,68 @@
+--- a/drivers/soc/arkmicro/hx170dec/hx170dec.c
++++ b/drivers/soc/arkmicro/hx170dec/hx170dec.c
+@@ -331,10 +331,30 @@
+ 	return 0;
+ }
+ 
++/*
++ * AUTOTOP: SIGIO completion for stock libmfc.so, whose DWL waits for SIGIO
++ * from the ISR (stock hx170dec.ko calls kill_fasync) instead of using the
++ * SDK's wait ioctl. Adapted from downstream linux-arkmicro 28ee264. Every file
++ * joins both queues; stock routes a file to one queue by instance type (its
++ * ioctl 1 marks a post-processor instance), which only matters with PP.
++ */
++static int vdec_misc_fasync(int fd, struct file *filp, int mode)
++{
++	struct vdec_device *p = filp->private_data;
++	int ret;
++
++	ret = fasync_helper(fd, filp, mode, &p->async_queue_dec);
++	if (ret < 0)
++		return ret;
++	return fasync_helper(fd, filp, mode, &p->async_queue_pp);
++}
++
+ static int vdec_misc_release(struct inode *inode, struct file *filp)
+ {
+ 	struct vdec_device *p = filp->private_data;
+ 
++	vdec_misc_fasync(-1, filp, 0);
++
+ 	if (p->dec_owner == filp) {
+ 		p->dec_irq_done = false;
+ 		init_waitqueue_head(&p->dec_wq);
+@@ -498,6 +518,7 @@
+ 	.open           =	vdec_misc_open,
+ 	.release        =	vdec_misc_release,
+ 	.unlocked_ioctl =	vdec_misc_ioctl,
++	.fasync         =	vdec_misc_fasync,
+ };
+ 
+ static struct miscdevice vdec_misc_device = {
+@@ -527,6 +548,7 @@
+ 
+ 		p->dec_irq_done = true;
+ 		wake_up_interruptible(&p->dec_wq);
++		kill_fasync(&p->async_queue_dec, SIGIO, POLL_IN);
+ 		handled++;
+ 	}
+ 
+@@ -537,6 +559,7 @@
+ 
+ 		p->pp_irq_done = true;
+ 		wake_up_interruptible(&p->pp_wq);
++		kill_fasync(&p->async_queue_pp, SIGIO, POLL_IN);
+ 		handled++;
+ 	}
+ 
+--- a/drivers/soc/arkmicro/hx170dec/hx170dec.h
++++ b/drivers/soc/arkmicro/hx170dec/hx170dec.h
+@@ -140,6 +140,8 @@
+ 	struct semaphore pp_sem;
+ 	struct file *dec_owner;
+ 	struct file *pp_owner;
++	struct fasync_struct *async_queue_dec;
++	struct fasync_struct *async_queue_pp;
+ 	u32 regs[VDEC_NUM_REGS_DEC + VDEC_NUM_REGS_PP];
+ 	struct mfc_jpeg_context context;
+ };

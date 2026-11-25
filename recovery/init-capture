@@ -1,0 +1,45 @@
+#!/bin/sh
+export PATH=/bin:/usr/bin
+export HOME=/root
+export PS1='ram-capture # '
+export OPENSSL_CONF=/dev/null
+/bin/busybox mount -t proc proc /proc
+/bin/busybox mount -t sysfs sysfs /sys
+/bin/busybox mount -t debugfs -o ro,nosuid,nodev,noexec debugfs /sys/kernel/debug
+/bin/busybox mount -t devtmpfs devtmpfs /dev
+exec </dev/console >/dev/console 2>&1
+echo 'Capture recovery: NAND programming is blocked in the driver.'
+echo 'NAND filesystems are not attached or mounted; S-Loader ECC is unvalidated.'
+mode=/sys/bus/platform/devices/musb-hdrc.1/mode
+if test -w "$mode"; then
+    echo host > "$mode" || echo 'U DISK host startup failed'
+else
+    echo 'U DISK mode control missing; USB bring-up is unproven'
+fi
+count=0
+while ! test -b /dev/sda1 && test "$count" -lt 20; do
+    /bin/busybox sleep 1
+    count=$((count + 1))
+done
+# Only a stick carrying the capture marker becomes writable. Inspect it
+# read-only first. Owner decision: AUTOTOP itself is the capture medium; its
+# existing files are never opened for writing (nand-capture writes new files
+# under CAPTURE/ only) and all of them have verified copies on the Mac.
+marker='AUTOTOP BM168 CAPTURE MEDIUM v1'
+if test -b /dev/sda1 &&
+    /bin/busybox mount -t vfat -o ro,nosuid,nodev,noexec /dev/sda1 /mnt/usb; then
+    if test "$(/bin/busybox head -n 1 /mnt/usb/AUTOTOP.CAP 2>/dev/null)" = "$marker"; then
+        /bin/busybox mount -o remount,rw,nosuid,nodev,noexec /mnt/usb &&
+            /bin/busybox mkdir -p /mnt/usb/CAPTURE &&
+            echo 'Capture medium verified and mounted read-write at /mnt/usb'
+    else
+        echo 'No capture marker; left mounted read-only'
+    fi
+fi
+echo AUTOTOP_CAPTURE_RECOVERY_READY
+/bin/busybox uname -a
+/bin/busybox cat /proc/mtd /proc/mounts
+while :; do
+    /bin/sh -i
+    echo 'Shell exited; starting another shell.'
+done

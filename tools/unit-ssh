@@ -1,0 +1,19 @@
+#!/bin/sh
+# A shell or one command on the unit, over its own Wi-Fi (docs/developer-access.md):
+#
+#   tools/unit-ssh                 a shell
+#   tools/unit-ssh COMMAND...      one command
+#   tools/unit-ssh --get REMOTE LOCAL     copy a file from the unit
+#   tools/unit-ssh --put LOCAL REMOTE     copy a file to it
+#
+# The Mac must be on the unit's Wi-Fi and "Developer access" on (System).
+# The private key and the unit's own key, once seen, are kept outside the
+# repository, in ~/.config/bm168-mb-v04/.
+K=${AUTOTOP_DEV_KEY:-$HOME/.config/bm168-mb-v04/dev-ssh-key}
+U=root@${AUTOTOP_UNIT:-192.168.43.1}
+O="-i $K -o IdentitiesOnly=yes -o UserKnownHostsFile=$HOME/.config/bm168-mb-v04/known_hosts -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 -o LogLevel=ERROR"
+case "${1:-}" in
+--get) exec scp -O $O "$U:$2" "$3" ;;
+--put) exec scp -O $O "$2" "$U:$3" ;;
+*) exec ssh $O "$U" "$@" ;;
+esac

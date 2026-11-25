@@ -1,0 +1,45 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../../tokens.css"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap"><style>
+*{box-sizing:border-box}html,body{margin:0}
+body{background:var(--ground);color:var(--ink);font-family:var(--font-sans);font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased}
+.eyebrow-20{text-transform:uppercase}
+svg.i{width:var(--icon);height:var(--icon);fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex:none}
+
+.row{height:var(--band);display:flex;align-items:center;gap:var(--space-3);padding:0 var(--space-4);border-radius:var(--radius-sm);border-bottom:1px solid var(--hairline);color:var(--ink);white-space:nowrap}
+.row .val{margin-left:auto;color:var(--ink-muted);white-space:nowrap}
+.row svg.chev{width:28px;height:28px;color:var(--ink-muted)}
+.row.focus{background:var(--amber-wash);outline:var(--ring) solid var(--amber);outline-offset:calc(-1 * var(--ring));border-bottom-color:rgba(0,0,0,0)}
+.row.press{background:var(--surface-raised)}
+.row.off{color:var(--ink-faint)}.row.off .val{color:var(--ink-faint)}
+
+.pill{height:var(--pill-h);padding:0 var(--space-5);border-radius:var(--radius-pill);display:inline-flex;align-items:center;gap:var(--space-2);background:var(--surface-raised);color:var(--ink);box-shadow:var(--edge-light);white-space:nowrap}
+.pill.primary{background:var(--blue);color:var(--on-blue)}
+.pill.focus{outline:var(--ring) solid var(--amber);outline-offset:var(--space-1)}
+.pill.off{background:rgba(0,0,0,0);box-shadow:none;border:1px solid var(--outline);color:var(--ink-faint)}
+.status{height:40px;padding:0 var(--space-3);border-radius:var(--radius-pill);display:inline-flex;align-items:center;gap:var(--space-2);background:var(--surface-raised);color:var(--ink);white-space:nowrap}
+.status i{width:12px;height:12px;border-radius:6px;background:var(--green);flex:none}
+.status.warn i{background:var(--yellow);border-radius:2px;transform:rotate(45deg)}
+.status.bad i{background:var(--red);border-radius:0}
+.status.idle i{background:rgba(0,0,0,0);border:2px solid var(--outline)}
+
+.tile{width:200px;height:160px;border-radius:var(--radius-lg);background:var(--surface);box-shadow:var(--edge-light);padding:var(--space-4);display:flex;flex-direction:column;justify-content:space-between;color:var(--ink)}
+.tile small{display:block;color:var(--ink-muted)}
+.tile.focus{outline:var(--ring) solid var(--amber);outline-offset:var(--space-1)}
+.tile.press{background:var(--surface-raised)}
+.tile.active{background:var(--blue);color:var(--on-blue)}.tile.active small{color:var(--on-blue)}
+.tile.empty{background:rgba(0,0,0,0);box-shadow:none;border:2px dashed var(--outline);color:var(--ink-muted)}
+
+.wrap{display:flex}
+.half{width:600px;height:400px;padding:var(--space-5);display:flex;flex-direction:column;gap:var(--space-4);position:relative;overflow:hidden}
+.half>*{position:relative}
+.half .eyebrow-20{color:var(--ink-muted)}
+.r{display:flex;gap:var(--space-4);align-items:center}
+.full{background:radial-gradient(520px 300px at 85% 0%,#1c2c44,rgba(0,0,0,0)),radial-gradient(420px 320px at 0% 100%,#2c1d16,rgba(0,0,0,0)),var(--ground)}
+.full .tile{background:var(--glass)}.full .pill:not(.primary){background:var(--glass-raised)}
+.full .focus{box-shadow:var(--focus-glow)}
+.full .tile.focus{box-shadow:var(--edge-light),var(--focus-glow)}
+.lite{border-left:1px solid var(--hairline)}
+</style></head><body><div class="wrap"><div class="half full"><div class="eyebrow-20">Full</div>
+<div class="r"><div class="tile focus"><svg class="i" viewBox="0 0 24 24"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg><div><div class="label-20">Anna's iPhone</div><small class="label-20">Profile 1</small></div></div><div class="tile"><svg class="i" viewBox="0 0 24 24"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg><div><div class="label-20">Work iPhone</div><small class="label-20">Profile 2</small></div></div></div>
+<div class="r"><span class="pill primary label-20">Open CarPlay</span><span class="pill label-20">Choose another phone</span></div></div><div class="half lite"><div class="eyebrow-20">Lite</div>
+<div class="r"><div class="tile focus"><svg class="i" viewBox="0 0 24 24"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg><div><div class="label-20">Anna's iPhone</div><small class="label-20">Profile 1</small></div></div><div class="tile"><svg class="i" viewBox="0 0 24 24"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg><div><div class="label-20">Work iPhone</div><small class="label-20">Profile 2</small></div></div></div>
+<div class="r"><span class="pill primary label-20">Open CarPlay</span><span class="pill label-20">Choose another phone</span></div></div></div></body></html>

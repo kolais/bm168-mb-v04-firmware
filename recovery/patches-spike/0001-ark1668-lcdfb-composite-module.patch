@@ -1,0 +1,11 @@
+--- a/drivers/video/fbdev/arkmicro/Makefile	2026-11-17 20:46:27
++++ b/drivers/video/fbdev/arkmicro/Makefile	2026-11-17 20:46:27
+@@ -1,4 +1,7 @@
+-obj-$(CONFIG_FB_ARK1668LCD)      += ark1668_lcdfb.o ark1668_lcdc_funcs.o
++# AUTOTOP: one composite object, so the driver also links as a module
++# (the two files call each other without exported symbols).
++obj-$(CONFIG_FB_ARK1668LCD)      += ark1668fb.o
++ark1668fb-objs                   := ark1668_lcdfb.o ark1668_lcdc_funcs.o
+ obj-$(CONFIG_FB_ARKN141LCD)	     += arkn141_lcdfb.o arkn141_lcdc_funcs.o
+ obj-$(CONFIG_FB_ARK1668ELCD)	 += ark1668e_lcdfb.o ark1668e_lcdc_funcs.o
+ obj-$(CONFIG_FB_ARKN141SLCD)	 += arkn141s_lcdfb.o

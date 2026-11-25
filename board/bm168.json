@@ -1,0 +1,16 @@
+{
+  "board": "BM168-MB-V04 / CM_BM168_V04",
+  "baseline": "BM168_V3.1.21-20230216 / ark169-20230216V1.0",
+  "rootfs_source": "local/stock/rootfs.ubi",
+  "rootfs_size": 114294784,
+  "rootfs_sha256": "bd3383953eae91391459b78b8044c739a48fe2651e43a0e9f65e231a32311e87",
+  "peb_size": 131072,
+  "min_io_size": 2048,
+  "vid_header_offset": 2048,
+  "leb_size": 126976,
+  "max_leb_count": 872,
+  "volume_name": "rootfs",
+  "volume_id": 0,
+  "ubi_image_sequence": 66088575,
+  "source_date_epoch": 1676505600
+}

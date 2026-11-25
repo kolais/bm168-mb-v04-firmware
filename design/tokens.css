@@ -1,0 +1,55 @@
+/* BM168 Launcher — generated from tokens.json by tools/design_tokens.py; do not edit */
+:root {
+  --ground: #030405;
+  --ground-raised: #090b0e;
+  --surface: #111419;
+  --surface-raised: #1a1f27;
+  --hairline: #252b34;
+  --outline: #5f6a7b;
+  --ink: #c9cdd2;
+  --ink-muted: #959da8;
+  --ink-faint: #7d8794;
+  --amber: #d64913;
+  --amber-wash: #3d0f04;
+  --amber-press: #6e1d07;
+  --on-amber: #0a0200;
+  --blue: #3384dc;
+  --blue-wash: #091d36;
+  --on-blue: #ffffff;
+  --green: #2aa84a;
+  --yellow: #d1b01a;
+  --glass: rgba(255,255,255,0.05);
+  --glass-raised: rgba(255,255,255,0.10);
+  --red: #e0566f;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 16px;
+  --space-4: 24px;
+  --space-5: 32px;
+  --space-6: 48px;
+  --radius-sm: 6px;
+  --radius-lg: 24px;
+  --radius-pill: 40px;
+  --edge-light: inset 0 1px 0 rgba(255,255,255,0.07);
+  --focus-glow: 0 0 20px rgba(214,73,19,0.36);
+  --screen-w: 1280px;
+  --screen-h: 480px;
+  --band: 60px;
+  --pill-h: 48px;
+  --icon: 40px;
+  --ring: 3px;
+  --dur-ack: 80ms;
+  --dur-step: 120ms;
+  --dur-bump: 140ms;
+  --dur-scroll: 160ms;
+  --dur-screen: 200ms;
+  --font-sans: Inter, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+}
+.clock-96 { font-family: var(--font-sans); font-size: 96px; line-height: 96px; font-weight: 300; letter-spacing: -0.02em; }
+.display-48 { font-family: var(--font-sans); font-size: 48px; line-height: 52px; font-weight: 600; letter-spacing: -0.015em; }
+.title-36 { font-family: var(--font-sans); font-size: 36px; line-height: 44px; font-weight: 600; letter-spacing: -0.01em; }
+.name-28 { font-family: var(--font-sans); font-size: 28px; line-height: 34px; font-weight: 600; letter-spacing: -0.005em; }
+.row-32 { font-family: var(--font-sans); font-size: 32px; line-height: 40px; font-weight: 400; }
+.body-24 { font-family: var(--font-sans); font-size: 24px; line-height: 32px; font-weight: 400; }
+.label-20 { font-family: var(--font-sans); font-size: 20px; line-height: 24px; font-weight: 600; letter-spacing: 0.01em; }
+.eyebrow-20 { font-family: var(--font-sans); font-size: 20px; line-height: 24px; font-weight: 600; letter-spacing: 0.08em; }

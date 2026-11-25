@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: GPL-2.0
+// The rescue installer (recovery/plan-a/init-rescue): the Plan A platform
+// (panel, both USB sockets, the MCU's line) with the bounded writer's one
+// window over the kernel and rootfs partitions together, and nothing of the
+// state window. Linux gets 64 MiB: the software U-Boot loaded for it lies
+// above, from 0x04000000, and must stay as it is. Every other partition
+// keeps its read-only flag; the driver starts disarmed.
+#include "bm168-spike.dts"
+/ {
+    model = "BM168 rescue installer";
+    chosen {
+        bootargs = "console=ttyS0,115200n8 earlyprintk mem=64M cma=0 rdinit=/init clk_ignore_unused panic=0";
+    };
+};
+&nfc {
+    autotop,write-window = <0x160000 0x7100000>;
+    partitions {
+        autotop-write-window {
+            label = "autotop-write-window";
+            reg = <0x160000 0x7100000>;
+        };
+    };
+};

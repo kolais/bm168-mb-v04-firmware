@@ -1,0 +1,125 @@
+// SPDX-License-Identifier: GPL-2.0
+// BM168 audio for the Plan A RAM spike, modelled on the stock 3.4 system
+// (docs/plan-a-audio.md): one card "ARK-SDDAC" with playback on the SoC's
+// internal SDDAC through I2S0 (device 0) and capture from the internal
+// SARADC (the microphone, left channel) through I2S1 (device 1), and the
+// ROHM BD37033 sound processor on a GPIO I2C bus as an auxiliary device, so
+// that the mixer controls come out in stock's order (numid 1-2 SDDAC, 3-33
+// BD37033). Register values, DMA request lines and masters were read from
+// stock with devmem (backups/2026-11-18/audio-stock/).
+#include <dt-bindings/gpio/gpio.h>
+
+&{/sregs@e4900000/clocks} {
+    // index-value 0 clears only this clock's bit in register 0x6c (which
+    // also holds ddrclk): the fixed 240 MHz source, as stock (0x6c bits 2
+    // and 0 clear). U-Boot leaves both on the audio PLL (426 MHz; SPIKE14
+    // read 0x00080f05). The I2S driver never enables these clocks; stock
+    // leaves every gate on.
+    i2s_dac_clk: i2s-dac-clk {
+        #clock-cells = <0>;
+        compatible = "arkmiro,ark-clk-sys";
+        clocks = <&clk240mhz>, <&audpll>;
+        reg = <0x6c>;
+        index-offset = <2>;
+        index-mask = <1>;
+        index-value = <0>;
+    };
+    i2s_adc_clk: i2s-adc-clk {
+        #clock-cells = <0>;
+        compatible = "arkmiro,ark-clk-sys";
+        clocks = <&clk240mhz>, <&audpll>;
+        reg = <0x6c>;
+        index-offset = <0>;
+        index-mask = <1>;
+        index-value = <0>;
+    };
+};
+
+/ {
+    i2c-gpio-2 {
+        // Stock i2c-gpio.2: SDA GPIO 9, SCL GPIO 121, udelay 5, timeout 10,
+        // SCL output-only. Both pads are already GPIO (same as stock).
+        compatible = "i2c-gpio";
+        #address-cells = <1>;
+        #size-cells = <0>;
+        gpios = <&gpio0 9 GPIO_ACTIVE_HIGH      /* SDA, GPIO 9 */
+                 &gpio3 25 GPIO_ACTIVE_HIGH>;   /* SCL, GPIO 121 */
+        i2c-gpio,delay-us = <5>;
+        i2c-gpio,timeout-ms = <10>;
+        i2c-gpio,scl-output-only;
+
+        bd37033: sound-processor@40 {
+            compatible = "arkmicro,drv_bd37033";
+            reg = <0x40>;
+            #sound-dai-cells = <0>;
+        };
+    };
+
+    sound {
+        compatible = "simple-audio-card";
+        #address-cells = <1>;
+        #size-cells = <0>;
+        simple-audio-card,name = "ARK-SDDAC";
+        simple-audio-card,format = "i2s";
+        simple-audio-card,aux-devs = <&bd37033>;
+
+        simple-audio-card,dai-link@0 {
+            // Device 0: playback. Stock I2S0 drives the bit clock (BCKD).
+            reg = <0>;
+            bitclock-master = <&playback_cpu>;
+            frame-master = <&playback_cpu>;
+            playback_cpu: cpu { sound-dai = <&i2s_dac>; };
+            codec { sound-dai = <&sddac>; };
+        };
+        simple-audio-card,dai-link@1 {
+            // Device 1: capture. Stock I2S1 takes its clocks (BCKD/SYNCD 0).
+            reg = <1>;
+            bitclock-master = <&capture_codec>;
+            frame-master = <&capture_codec>;
+            cpu { sound-dai = <&i2s_adc>; };
+            capture_codec: codec { sound-dai = <&sdadc>; };
+        };
+    };
+
+    sdadc: sdadc {
+        compatible = "arkmicro,ark1668-sdadc";
+        #sound-dai-cells = <0>;
+    };
+};
+
+&{/ahb} {
+    i2s_dac: i2s@e4000000 {
+        // I2S0 + SDDAC. Stock DMA: playback request 1, memory on master 0,
+        // peripheral on master 1 (CTL 0x1890d925, CFG_HI 0x1002).
+        compatible = "arkmicro,ark1668-i2s";
+        reg = <0xe4000000 0x1000>;
+        nco-reg = <0xe4900174>;
+        dmas = <&dwdma0 0 1 0>, <&dwdma0 1 0 1>;
+        dma-names = "rx", "tx";
+        clocks = <&i2s_dac_clk>;
+        #sound-dai-cells = <0>;
+    };
+
+    sddac: sddac@e4000000 {
+        // Shares I2S0's registers (plain ioremap, no region claim). Stock
+        // volume 127/127, written only while unmuted.
+        compatible = "arkmicro,ark1668-sddac";
+        reg = <0xe4000000 0x1000>;
+        left-volume = <127>;
+        right-volume = <127>;
+        #sound-dai-cells = <0>;
+    };
+
+    i2s_adc: i2s@e8200000 {
+        // I2S1 + SARADC. Stock DMA: capture request 23, peripheral on
+        // master 0, memory on master 1 (CTL 0x18a0dc25, CFG_HI 0xb82). The
+        // driver muxes the I2S1 pads on capture startup, as stock.
+        compatible = "arkmicro,ark1668-i2s";
+        reg = <0xe8200000 0x1000>;
+        nco-reg = <0xe4900178>;
+        dmas = <&dwdma0 23 1 0>, <&dwdma0 24 0 1>;
+        dma-names = "rx", "tx";
+        clocks = <&i2s_adc_clk>;
+        #sound-dai-cells = <0>;
+    };
+};

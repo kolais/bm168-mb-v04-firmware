@@ -1,0 +1,11 @@
+--- a/drivers/soc/arkmicro/hx170dec/Makefile	2026-11-17 21:32:01
++++ b/drivers/soc/arkmicro/hx170dec/Makefile	2026-11-17 21:32:01
+@@ -2,5 +2,6 @@
+ # Makefile: HX170DEC
+ #
+ 
+-obj-$(CONFIG_ARK_HX170DEC)	+= hx170dec.o 
+-obj-$(CONFIG_ARK_HX170DEC)	+= jpegdecapi.o jpegdechdrs.o jpegdecinternal.o jpegdecscan.o jpegdecutils.o regdrv.o dwl_linux.o dwl_linux_sc.o
++# AUTOTOP: one composite object so the decoder also links as a module.
++obj-$(CONFIG_ARK_HX170DEC)	+= arkvdec.o
++arkvdec-objs := hx170dec.o jpegdecapi.o jpegdechdrs.o jpegdecinternal.o jpegdecscan.o jpegdecutils.o regdrv.o dwl_linux.o dwl_linux_sc.o

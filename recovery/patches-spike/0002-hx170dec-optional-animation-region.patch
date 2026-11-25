@@ -1,0 +1,27 @@
+--- a/drivers/soc/arkmicro/hx170dec/hx170dec.c	2026-11-17 21:31:36
++++ b/drivers/soc/arkmicro/hx170dec/hx170dec.c	2026-11-17 21:31:36
+@@ -623,8 +623,14 @@
+ 
+ //MFC jpeg decode
+ 	animres = platform_get_resource(pdev, IORESOURCE_MEM, 1);
+-	if (IS_ERR(animres)) {
+-		return PTR_ERR(animres);
++	if (!animres) {
++		/* AUTOTOP: no boot-animation region on this board (as on the SDK's
++		 * own ark169 board); platform_get_resource() returns NULL, not an
++		 * error pointer. Take the existing no-animation path. */
++		p->context.dev = p->dev;
++		vde_jpeg_context = &p->context;
++		p->context.animation_end = true;
++		goto reset_asic;
+ 	}
+ 
+ 	p->context.dev = p->dev;
+@@ -672,6 +678,7 @@
+ 	} else
+ 		p->context.animation_end = true;
+ 
++reset_asic:
+ 	/* Reset Asic (just in case..) */
+ 	vdec_writel(p, VDEC_DIR, VDEC_DIR_ID | VDEC_DIR_ABORT);
+ 	vdec_writel(p, VDEC_PPIR, VDEC_PPIR_ID);

@@ -1,0 +1,511 @@
+AUTOTOP: ARK1668 audio as stock 3.4 runs it on the BM168.
+
+- I2S blocks: the control values stock leaves in them (devmem, constant
+  while idle, recording and playing), including the DMA request enables the
+  SDK left commented out; stock's clock-generator step/modulo pairs; mic
+  front-end gain and enhance as module parameters (stock: 0, off).
+- PCM: ark-dma.c has no dmaengine cyclic callback, so the generic
+  dmaengine PCM failed every start with -ENOMEM (SPIKE14). Use its
+  dw_dma_cyclic_* API directly, as stock's snd-soc-ark-pcm-dma does, with
+  the position read from the channel's memory-side address register.
+  Downstream de1e2ad does the same but mirrors the private descriptor with a
+  layout that differs from this SDK's; include the real header instead.
+- SDDAC: stock's control names (numid 1/2), working volume, and mute that
+  clears the volume register as stock's ark_audio_mute does (downstream
+  fd81d03/f419add reviewed, not taken as is).
+- BD37033: fix the build (void function returning a value, as downstream)
+  and a double free on remove (devm memory passed to kfree).
+
+--- a/sound/soc/arkmicro/BD37033.c
++++ b/sound/soc/arkmicro/BD37033.c
+@@ -2054,8 +2054,7 @@
+ 
+ //static int bd37033_remove(struct snd_soc_codec *codec)
+ static void bd37033_remove(struct snd_soc_component *component)
+-{//printk("==============[%s]:[ %d]\n", __FUNCTION__, __LINE__);
+-	return 0;
++{
+ }
+ 
+ //static int bd37033_suspend(struct snd_soc_codec *codec)
+@@ -2194,9 +2193,7 @@
+ 		return -ENODEV;
+ 	}
+ 
+-	if(bd)
+-		kfree(bd);
+-	
++	/* bd is devm-allocated in probe: no kfree here. */
+    	i2c_set_clientdata(client, NULL);	
+ 	
+ 	return 0;
+--- a/sound/soc/arkmicro/ark1668-sddac-codec.c
++++ b/sound/soc/arkmicro/ark1668-sddac-codec.c
+@@ -21,64 +21,51 @@
+ 	void __iomem	*base;
+ 	unsigned int 	vol_l;
+ 	unsigned int 	vol_r;
++	bool		muted;
+ };
+ 
+-static int ark_sddac_get_l_playback_volume (struct snd_kcontrol * kcontrol, struct snd_ctl_elem_value * ucontrol)
++/* AUTOTOP: stock keeps the volume in DACR0 only while unmuted (its
++ * ark_audio_mute logs reg=0 when muted, 0x7f7f at volume 127/127). */
++static void ark_sddac_apply(struct ark_sddac *dac)
+ {
+-//	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+-//	struct ark_sddac *dac = snd_soc_component_get_drvdata(component);
+-
+-//	ucontrol->value.integer.value[0] = dac->vol_l & 0x7f;
+-//	//printk("get_l_playback_volume = %ld\n",ucontrol->value.integer.value[0]);
+-	return 0;
++	writel(dac->muted ? 0 : DACR0_RVOL(dac->vol_r) | DACR0_LVOL(dac->vol_l),
++	       dac->base + I2S_DACR0);
+ }
+ 
+-static int ark_sddac_set_l_playback_volume (struct snd_kcontrol * kcontrol, struct snd_ctl_elem_value * ucontrol)
++static int ark_sddac_get_vol(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
+ {
+-//	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+-//	struct ark_sddac *dac = snd_soc_component_get_drvdata(component);
+-//	unsigned int val = readl(dac->base + I2S_DACR0);
+-//	dac->vol_l = ucontrol->value.integer.value[0];
+-//	//printk("set_l_playback_volume = %d\n",dac->vol_l);
+-//	val &= ~DACR0_LVOL_MASK;
+-//	val |= DACR0_LVOL(dac->vol_l);
+-//	//printk("new_l_playback_volume = 0x%x\n",DACR0_LVOL(dac->vol_l));
+-//	writel(val, dac->base + I2S_DACR0);
++	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
++	struct ark_sddac *dac = snd_soc_component_get_drvdata(component);
++	struct soc_mixer_control *mc = (struct soc_mixer_control *)kcontrol->private_value;
+ 
++	ucontrol->value.integer.value[0] = mc->reg ? dac->vol_r : dac->vol_l;
+ 	return 0;
+ }
+ 
+-static int ark_sddac_get_r_playback_volume (struct snd_kcontrol * kcontrol, struct snd_ctl_elem_value * ucontrol)
++static int ark_sddac_set_vol(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
+ {
+-//	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+-//	struct ark_sddac *dac = snd_soc_component_get_drvdata(component);
++	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
++	struct ark_sddac *dac = snd_soc_component_get_drvdata(component);
++	struct soc_mixer_control *mc = (struct soc_mixer_control *)kcontrol->private_value;
++	long v = ucontrol->value.integer.value[0];
++	unsigned int *vol = mc->reg ? &dac->vol_r : &dac->vol_l;
+ 
+-//	ucontrol->value.integer.value[0] = dac->vol_r & 0x7f;
+-//	//printk("get_r_playback_volume = %ld\n",ucontrol->value.integer.value[0]);
+-	return 0;
++	if (v < 0 || v > 127)
++		return -EINVAL;
++	if (*vol == v)
++		return 0;
++	*vol = v;
++	ark_sddac_apply(dac);
++	return 1;
+ }
+ 
+-static int ark_sddac_set_r_playback_volume (struct snd_kcontrol * kcontrol, struct snd_ctl_elem_value * ucontrol)
+-{
+-//	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+-//	struct ark_sddac *dac = snd_soc_component_get_drvdata(component);
+-//	unsigned int val = readl(dac->base + I2S_DACR0);
+-//	dac->vol_r = ucontrol->value.integer.value[0];
+-//	//printk("set_r_playback_volume = %d\n",dac->vol_r);
+-//	val &= ~DACR0_RVOL_MASK;
+-//	val |= DACR0_RVOL(dac->vol_r);
+-//	//printk("new_r_playback_volume = 0x%x\n",DACR0_RVOL(dac->vol_r));
+-//	writel(val, dac->base + I2S_DACR0);
+-
+-	return 0;
+-}
+-
+ static const struct snd_kcontrol_new  ark_sddac_snd_controls[] = {
+ 	/* DAC volume control */
+-	SOC_SINGLE_EXT("Left Playback Volume 2", 0, 0, 127, 0,
+-			ark_sddac_get_l_playback_volume, ark_sddac_set_l_playback_volume),
+-	SOC_SINGLE_EXT("Right Playback Volume 2", 0, 0, 127, 0,
+-			ark_sddac_get_r_playback_volume, ark_sddac_set_r_playback_volume),
++	/* Stock names and order (numid 1 and 2, used by Launcher). */
++	SOC_SINGLE_EXT("Left Playback Volume", 0, 0, 127, 0,
++			ark_sddac_get_vol, ark_sddac_set_vol),
++	SOC_SINGLE_EXT("Right Playback Volume", 1, 0, 127, 0,
++			ark_sddac_get_vol, ark_sddac_set_vol),
+ };
+ 
+ static const struct snd_soc_dapm_widget ark_sddac_dapm_widgets[] = {
+@@ -111,6 +98,10 @@
+ 
+ static int ark_sddac_mute(struct snd_soc_dai *dai, int mute)
+ {
++	struct ark_sddac *dac = snd_soc_component_get_drvdata(dai->component);
++
++	dac->muted = mute;
++	ark_sddac_apply(dac);
+ 	return 0;
+ }
+ 
+@@ -153,7 +144,8 @@
+ 	struct ark_sddac *dac = snd_soc_component_get_drvdata(component);
+ 	int ret = 0;
+ 
+-	writel(DACR0_RVOL(dac->vol_r) | DACR0_LVOL(dac->vol_l), dac->base + I2S_DACR0);
++	dac->muted = true;
++	ark_sddac_apply(dac);
+ 
+ 	return ret;
+ }
+--- a/sound/soc/arkmicro/ark1668_i2s.c
++++ b/sound/soc/arkmicro/ark1668_i2s.c
+@@ -15,14 +15,41 @@
+ #include <sound/pcm_params.h>
+ #include <sound/soc.h>
+ #include <linux/clk.h>
++#include <linux/math64.h>
++#include <linux/dma-mapping.h>
+ #include <sound/dmaengine_pcm.h>
+ //#include <mach/va_map.h>
+ #include "ark1668_i2s.h"
+ //#include "ark1668_pcm.h"
+ #include "ark1668_i2s_sddac_regs.h"
++/* AUTOTOP: ark-dma.c has no dmaengine cyclic callback; cyclic transfers
++ * exist only through its own dw_dma_cyclic_* API, which stock's
++ * snd-soc-ark-pcm-dma also calls. Its declarations live in the driver's
++ * private header. */
++#include "../../../drivers/dma/ark-dma.h"
+ //#include <linux/ark/ark_i2s.h>
+ 
+ #define DRV_NAME	"ark1668-i2s"
++
++/* AUTOTOP: control values the stock 3.4 driver leaves in both blocks on the
++ * BM168 (devmem while idle, recording and playing: they never change).
++ * I2S0 (0xe4000000) feeds the internal SDDAC, I2S1 (0xe8200000) carries the
++ * internal SARADC (the microphone, left channel). */
++#define STOCK_I2S0_SACR0	0x138f0f0d	/* I2SEN BCKD TDMAENA, DAC and VREF on */
++#define STOCK_I2S0_SACR1	0x00000001	/* record disabled */
++#define STOCK_I2S0_DACR1	0x00000030	/* LRSW */
++#define STOCK_I2S1_SACR0	0x06ff0f41	/* I2SEN RDMAENA, SARADC on, MIC_LINE_SEL */
++#define STOCK_I2S1_SACR1	0x00000002	/* play disabled */
++#define STOCK_I2S1_DACR1	0x00000010
++
++/* Microphone front end (ADCR0): stock leaves 0 (lowest gain, no enhance);
++ * speech then averages about -40 dBFS. Bench parameters, stock by default. */
++static int mic_gain;
++module_param(mic_gain, int, 0644);
++MODULE_PARM_DESC(mic_gain, "SARADC gain 0-15 for both channels (stock 0)");
++static bool mic_enh;
++module_param(mic_enh, bool, 0644);
++MODULE_PARM_DESC(mic_enh, "SARADC mic enhance (stock off)");
+ #define DMA_ENABLE
+ 
+ #undef ARK_I2S_DEBUG
+@@ -135,13 +162,7 @@
+ 		val = readl(Sys_base + ARK_SYS_PAD_CTRL0C);
+ 		writel(val | ARK_SYS_I2S_MCLK_AUX, Sys_base + ARK_SYS_PAD_CTRL0C);
+ 
+-		val = readl(i2s->base + ARK_I2SSDDAC_SACR0);
+-		val |= ARK_I2SSDDAC_SACR0_I2SEN;//i2s enable
+-		// cancel pop noise
+-		//val |= ARK_I2SSDDAC_SACR0_BCKD;// Bitclock output
+-		val |= ARK_I2SSDDAC_SACR0_TFTH; // set tfth
+-		val |= ARK_I2SSDDAC_SACR0_SARADC_DATA; // set saradc data
+-		writel(val, i2s->base + ARK_I2SSDDAC_SACR0);
++		writel(STOCK_I2S0_SACR0, i2s->base + ARK_I2SSDDAC_SACR0);
+ 
+ 		val = readl(i2s->base + ARK_I2SSDDAC_SAIMR);
+ 		val &= ~(ARK_I2SSDDAC_SAIMR_TFS 
+@@ -158,19 +179,9 @@
+ 				|ARK_I2SSDDAC_SAICR_TUR);
+ 		writel(val, i2s->base + ARK_I2SSDDAC_SAICR);
+ 
+-		
+-//		val = readl(i2s->base + ARK_I2SSDDAC_SACR0);
+-//		val |= ARK_I2SSDDAC_SACR0_TDMAENA;	// enable tx dma
+-//		writel(val, i2s->base + ARK_I2SSDDAC_SACR0);
+-
+-		val = readl(i2s->base + ARK_I2SSDDAC_SACR1);
+-		val &= ~ARK_I2SSDDAC_SACR1_DIS_PLAY;	//enable play
+-		writel(val, i2s->base + ARK_I2SSDDAC_SACR1);
+-		writel(0, i2s->base + ARK_I2SSDDAC_DACR0);
+-
+-		val = readl(i2s->base + ARK_I2SSDDAC_DACR1);
+-		val |= ARK_I2SSDDAC_DACR1_LRSW; 	// left/right audio play channel switch
+-		writel(val, i2s->base + ARK_I2SSDDAC_DACR1);
++		writel(STOCK_I2S0_SACR1, i2s->base + ARK_I2SSDDAC_SACR1);
++		/* Volume (DACR0) belongs to the SDDAC codec's mute and controls. */
++		writel(STOCK_I2S0_DACR1, i2s->base + ARK_I2SSDDAC_DACR1);
+ 	}
+ 	else if(substream->stream == SNDRV_PCM_STREAM_CAPTURE)
+ 	{printk("==============[%s]:[ %d]\n", __FUNCTION__, __LINE__);
+@@ -192,26 +203,7 @@
+ 		val &= ~ARK_SYS_I2S_DATA_DIR_OUT;
+ 		writel(val, Sys_base + ARK_SYS_PAD_CTRL06);
+ 
+-		val = readl(i2s->base + ARK_I2SSDDAC_SACR0);
+-		val &= ~(ARK_I2SSDDAC_SACR0_SARADC_VREF
+-				|ARK_I2SSDDAC_SACR0_SARADC_DATA
+-				|ARK_I2SSDDAC_SACR0_DACCLK_EDGE
+-				|ARK_I2SSDDAC_SACR0_RDMAENA
+-				|ARK_I2SSDDAC_SACR0_LOOPBACK
+-				|ARK_I2SSDDAC_SACR0_BCKD
+-				|ARK_I2SSDDAC_SACR0_SYNCD);
+-		val |= (ARK_I2SSDDAC_SACR0_MIC_LINE_SEL
+-				|ARK_I2SSDDAC_SACR0_SARADC_POW_EN
+-				|ARK_I2SSDDAC_SACR0_SARADC_EN
+-				|ARK_I2SSDDAC_SACR0_DAC_PD
+-				|ARK_I2SSDDAC_SACR0_VREF_PD
+-				|ARK_I2SSDDAC_SACR0_RFTH
+-#if defined(CONFIG_FM1288_Driver)
+-				|ARK_I2SSDDAC_SACR0_BCKD		//the module of fm1288 is weird, when capturing, 
+-				|ARK_I2SSDDAC_SACR0_SYNCD		//you must set the direction of the tow guys output as playback
+-#endif
+-				|ARK_I2SSDDAC_SACR0_I2SEN);
+-		writel(val, i2s->base + ARK_I2SSDDAC_SACR0);
++		writel(STOCK_I2S1_SACR0, i2s->base + ARK_I2SSDDAC_SACR0);
+ 
+ 		val = readl(i2s->base + ARK_I2SSDDAC_SAIMR);
+ 		val &= ~(ARK_I2SSDDAC_SAIMR_RFS 
+@@ -228,13 +220,10 @@
+ 				|ARK_I2SSDDAC_SAICR_ROR);
+ 		writel(val, i2s->base + ARK_I2SSDDAC_SAICR);
+ 
+-//		val = readl(i2s->base + ARK_I2SSDDAC_SACR0);
+-//		val |= ARK_I2SSDDAC_SACR0_RDMAENA;		 // enable rx dma
+-//		writel(val, i2s->base + ARK_I2SSDDAC_SACR0);
+-
+-		val = readl(i2s->base + ARK_I2SSDDAC_SACR1);
+-		val &= ~ARK_I2SSDDAC_SACR1_DIS_REC; 	//enable record
+-		writel(val, i2s->base + ARK_I2SSDDAC_SACR1);
++		writel(STOCK_I2S1_SACR1, i2s->base + ARK_I2SSDDAC_SACR1);
++		writel(STOCK_I2S1_DACR1, i2s->base + ARK_I2SSDDAC_DACR1);
++		writel((clamp(mic_gain, 0, 15) * 0x11) | (mic_enh ? ARK_I2SSDDAC_ADCR0_MIC_ENH : 0),
++		       i2s->base + ARK_I2SSDDAC_ADCR0);
+ 	}
+ 	/* Tx/Rx Config */
+ 	//snd_soc_dai_set_dma_data(dai, substream, &i2s->dma_params[substream->stream]);
+@@ -250,7 +239,7 @@
+ 	//struct ark_i2s_dev *i2s = snd_soc_dai_get_drvdata(dai);
+ 	struct ark_i2s_dev *i2s = snd_soc_dai_get_drvdata(dai);
+ 	u32 rate = params_rate(params);
+-	u32 step = 256 * 2, modulo;
++	u32 step, modulo;
+ 	u32 val, freq;
+ 	void *sysreg;
+ 
+@@ -259,7 +248,12 @@
+ 
+ 	/* mclk = rate * 256, mclk = freq * step / (2 * modulo) */
+ 	freq = clk_get_rate(i2s->clk);
+-	modulo = freq / rate;
++	if (!freq)
++		return -EINVAL;
++	/* mclk = 256 * rate = freq * step / (2 * modulo); stock's pairs, e.g.
++	 * 48 kHz (192, 1875) and 44.1 kHz (1764, 18750) from 240 MHz. */
++	modulo = rate % 4000 ? 18750 : 1875;
++	step = div_u64((u64)rate * 512 * modulo, freq);
+ 	val = (step << 16) | modulo;
+ 	sysreg = ioremap(i2s->nco_reg, 0x10);
+ 	if (sysreg) {
+@@ -463,14 +457,181 @@
+ #endif
+ };
+ 
+-static const struct snd_dmaengine_pcm_config 
+-ark1668_i2s_dmaengine_pcm_config = {
+-	.prepare_slave_config	= snd_dmaengine_pcm_prepare_slave_config,
+-	.pcm_hardware		= &ark1668_pcm_hardware,
++/* AUTOTOP: PCM on ark-dma's cyclic API, as stock's ark_pcm_dma: a cyclic
++ * linked list over the ALSA buffer, one block interrupt per period, the
++ * position read back from the channel's memory-side address register. */
++struct ark_pcm_rtd {
++	struct dma_chan		*chan;
++	bool			prepared;
+ };
+ 
++static void ark_pcm_period_done(void *param)
++{
++	snd_pcm_period_elapsed(param);
++}
++
++static int ark_pcm_open(struct snd_pcm_substream *substream)
++{
++	struct snd_soc_pcm_runtime *rtd = substream->private_data;
++	struct ark_pcm_rtd *prtd;
++	int ret;
++
++	ret = snd_soc_set_runtime_hwparams(substream, &ark1668_pcm_hardware);
++	if (ret)
++		return ret;
++	ret = snd_pcm_hw_constraint_integer(substream->runtime, SNDRV_PCM_HW_PARAM_PERIODS);
++	if (ret < 0)
++		return ret;
++	prtd = kzalloc(sizeof(*prtd), GFP_KERNEL);
++	if (!prtd)
++		return -ENOMEM;
++	prtd->chan = dma_request_slave_channel(rtd->cpu_dai->dev,
++			substream->stream == SNDRV_PCM_STREAM_PLAYBACK ? "tx" : "rx");
++	if (!prtd->chan) {
++		dev_err(rtd->cpu_dai->dev, "no DMA channel\n");
++		kfree(prtd);
++		return -EBUSY;
++	}
++	substream->runtime->private_data = prtd;
++	return 0;
++}
++
++static void ark_pcm_unprepare(struct ark_pcm_rtd *prtd)
++{
++	if (prtd->prepared) {
++		dw_dma_cyclic_free(prtd->chan);
++		prtd->prepared = false;
++	}
++}
++
++static int ark_pcm_close(struct snd_pcm_substream *substream)
++{
++	struct ark_pcm_rtd *prtd = substream->runtime->private_data;
++
++	ark_pcm_unprepare(prtd);
++	dma_release_channel(prtd->chan);
++	kfree(prtd);
++	return 0;
++}
++
++static int ark_pcm_hw_params(struct snd_pcm_substream *substream,
++			     struct snd_pcm_hw_params *params)
++{
++	struct snd_soc_pcm_runtime *rtd = substream->private_data;
++	struct ark_i2s_dev *i2s = snd_soc_dai_get_drvdata(rtd->cpu_dai);
++	struct ark_pcm_rtd *prtd = substream->runtime->private_data;
++	struct dma_slave_config cfg = { 0 };
++	int ret;
++
++	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
++		cfg.direction = DMA_MEM_TO_DEV;
++		cfg.dst_addr = i2s->playback_dma_data.addr;
++		cfg.dst_addr_width = i2s->playback_dma_data.addr_width;
++		cfg.dst_maxburst = i2s->playback_dma_data.maxburst;
++		/* Stock bursts 16 words on the memory side too (CTL 0x1890d925). */
++		cfg.src_addr_width = cfg.dst_addr_width;
++		cfg.src_maxburst = cfg.dst_maxburst;
++	} else {
++		cfg.direction = DMA_DEV_TO_MEM;
++		cfg.src_addr = i2s->capture_dma_data.addr;
++		cfg.src_addr_width = i2s->capture_dma_data.addr_width;
++		cfg.src_maxburst = i2s->capture_dma_data.maxburst;
++		/* Stock: memory side also 16-word bursts (CTL 0x18a0dc25). */
++		cfg.dst_addr_width = cfg.src_addr_width;
++		cfg.dst_maxburst = cfg.src_maxburst;
++	}
++	ret = dmaengine_slave_config(prtd->chan, &cfg);
++	if (ret)
++		return ret;
++	return snd_pcm_lib_malloc_pages(substream, params_buffer_bytes(params));
++}
++
++static int ark_pcm_hw_free(struct snd_pcm_substream *substream)
++{
++	ark_pcm_unprepare(substream->runtime->private_data);
++	return snd_pcm_lib_free_pages(substream);
++}
++
++static int ark_pcm_prepare(struct snd_pcm_substream *substream)
++{
++	struct snd_pcm_runtime *runtime = substream->runtime;
++	struct ark_pcm_rtd *prtd = runtime->private_data;
++	struct dw_cyclic_desc *cdesc;
++
++	/* A fresh list on every prepare (also after stop/start cycles). */
++	ark_pcm_unprepare(prtd);
++	cdesc = dw_dma_cyclic_prep(prtd->chan, runtime->dma_addr,
++			snd_pcm_lib_buffer_bytes(substream),
++			snd_pcm_lib_period_bytes(substream),
++			substream->stream == SNDRV_PCM_STREAM_PLAYBACK ?
++				DMA_MEM_TO_DEV : DMA_DEV_TO_MEM);
++	if (IS_ERR(cdesc))
++		return PTR_ERR(cdesc);
++	cdesc->period_callback = ark_pcm_period_done;
++	cdesc->period_callback_param = substream;
++	prtd->prepared = true;
++	return 0;
++}
++
++static int ark_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
++{
++	struct ark_pcm_rtd *prtd = substream->runtime->private_data;
++
++	switch (cmd) {
++	case SNDRV_PCM_TRIGGER_START:
++	case SNDRV_PCM_TRIGGER_RESUME:
++	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
++		return dw_dma_cyclic_start(prtd->chan);
++	case SNDRV_PCM_TRIGGER_STOP:
++	case SNDRV_PCM_TRIGGER_SUSPEND:
++	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
++		dw_dma_cyclic_stop(prtd->chan);
++		return 0;
++	}
++	return -EINVAL;
++}
++
++static snd_pcm_uframes_t ark_pcm_pointer(struct snd_pcm_substream *substream)
++{
++	struct snd_pcm_runtime *runtime = substream->runtime;
++	struct ark_pcm_rtd *prtd = runtime->private_data;
++	dma_addr_t pos = substream->stream == SNDRV_PCM_STREAM_PLAYBACK ?
++		dw_dma_get_src_addr(prtd->chan) : dw_dma_get_dst_addr(prtd->chan);
++	snd_pcm_uframes_t x;
++
++	if (pos < runtime->dma_addr)
++		return 0;
++	x = bytes_to_frames(runtime, pos - runtime->dma_addr);
++	return x >= runtime->buffer_size ? 0 : x;
++}
++
++static int ark_pcm_new(struct snd_soc_pcm_runtime *rtd)
++{
++	struct snd_card *card = rtd->card->snd_card;
++	int ret = dma_coerce_mask_and_coherent(card->dev, DMA_BIT_MASK(32));
++
++	if (ret)
++		return ret;
++	return snd_pcm_lib_preallocate_pages_for_all(rtd->pcm, SNDRV_DMA_TYPE_DEV,
++			card->dev, ark1668_pcm_hardware.buffer_bytes_max,
++			ark1668_pcm_hardware.buffer_bytes_max);
++}
++
++static const struct snd_pcm_ops ark_pcm_ops = {
++	.open		= ark_pcm_open,
++	.close		= ark_pcm_close,
++	.ioctl		= snd_pcm_lib_ioctl,
++	.hw_params	= ark_pcm_hw_params,
++	.hw_free	= ark_pcm_hw_free,
++	.prepare	= ark_pcm_prepare,
++	.trigger	= ark_pcm_trigger,
++	.pointer	= ark_pcm_pointer,
++};
++
+ static const struct snd_soc_component_driver ark1668_i2s_component = {
+ 	.name		= DRV_NAME,
++	.ops		= &ark_pcm_ops,
++	.pcm_new	= ark_pcm_new,
+ };
+ 
+ static int ark1668_i2s_drv_probe(struct platform_device *pdev)
+@@ -529,15 +690,6 @@
+ 	}
+ 	i2s_poweron(i2s);
+ 
+-	ret = devm_snd_dmaengine_pcm_register(&pdev->dev,
+-						&ark1668_i2s_dmaengine_pcm_config,
+-						0);
+-//	ret = devm_snd_dmaengine_pcm_register(&pdev->dev, NULL, 0);
+-	if (ret) {
+-		dev_err(&pdev->dev, "Could not register PCM\n");
+-		return ret;
+-	}
+-	
+ 	printk("end:==============[%s]:[ %d]\n", __FUNCTION__, __LINE__);
+ 	return 0;
+ }

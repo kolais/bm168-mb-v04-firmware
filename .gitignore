@@ -1,0 +1,16 @@
+.idea/
+*.iml
+/backups/
+/build/
+/dist/
+/.cache/
+/vendor/
+__pycache__/
+
+# Local Python environment for bench tools (pyusb)
+/.venv/
+
+
+# The builder's own keys, captures, session files and artwork
+/local/*
+!/local/README.md

@@ -1,0 +1,80 @@
+--- a/linux/drivers/char/random.c
++++ b/linux/drivers/char/random.c
+@@ -428,11 +428,7 @@
+  * its value (from 0->1->2).
+  */
+ static int crng_init = 0;
+-#ifdef CONFIG_ARCH_ARKMICRO
+-#define crng_ready() (likely(crng_init > 0))
+-#else
+ #define crng_ready() (likely(crng_init > 1))
+-#endif
+ static int crng_init_cnt = 0;
+ static unsigned long crng_global_init_time = 0;
+ #define CRNG_INIT_CNT_THRESH (2*CHACHA20_KEY_SIZE)
+--- a/buildroot/package/busybox/busybox.mk
++++ b/buildroot/package/busybox/busybox.mk
+@@ -217,14 +217,9 @@
+ 	$(SED) '/# GENERIC_SERIAL$$/s~^.*#~$(SYSTEM_GETTY_PORT)::respawn:/sbin/getty -L $(SYSTEM_GETTY_OPTIONS) $(SYSTEM_GETTY_PORT) $(SYSTEM_GETTY_BAUDRATE) $(SYSTEM_GETTY_TERM) #~' \
+ 		$(TARGET_DIR)/etc/inittab
+ endef
+-else
+-define BUSYBOX_SET_GETTY
+-	$(SED) '/# GENERIC_SERIAL$$/s~^.*#~::respawn:-/bin/sh #~' \
+-		$(TARGET_DIR)/etc/inittab
+-endef
++BUSYBOX_TARGET_FINALIZE_HOOKS += BUSYBOX_SET_GETTY
+ endif # BR2_TARGET_GENERIC_GETTY
+ 
+-BUSYBOX_TARGET_FINALIZE_HOOKS += BUSYBOX_SET_GETTY
+ BUSYBOX_TARGET_FINALIZE_HOOKS += SYSTEM_REMOUNT_ROOT_INITTAB
+ 
+ endif # BR2_INIT_BUSYBOX
+--- a/u-boot/tools/env/fw_env.c
++++ b/u-boot/tools/env/fw_env.c
+@@ -82,8 +82,7 @@
+ #define DEVTYPE(i)    envdevices[(i)].mtd_type
+ #define IS_UBI(i)     envdevices[(i)].is_ubi
+ 
+-#define CUR_ENVSIZE 	ENVSIZE(dev_current)
+-#define USE_THE_EMMC       0
++#define CUR_ENVSIZE ENVSIZE(dev_current)
+ 
+ static unsigned long usable_envsize;
+ #define ENV_SIZE      usable_envsize
+@@ -900,19 +899,10 @@
+ 				   MEMGETBADBLOCK needs 64 bits */
+ 	int rc;
+ 
+-#if USE_THE_EMMC
+ 	blockstart = (offset / DEVESIZE(dev)) * DEVESIZE(dev);
+ 
+ 	/* Offset inside a block */
+ 	block_seek = offset - blockstart;
+-
+-#else
+-	blockstart = 0;
+-
+-	/* Offset inside a block */
+-	block_seek = 0;
+-#endif
+-
+ 
+ 	if (DEVTYPE(dev) == MTD_NANDFLASH) {
+ 		/*
+@@ -1014,15 +1004,10 @@
+ 		/* Maximum area we may use */
+ 		erase_len = environment_end(dev) - erase_offset;
+ 
+-#if USE_THE_EMMC
+ 		blockstart = erase_offset;
+ 
+ 		/* Offset inside a block */
+ 		block_seek = DEVOFFSET(dev) - erase_offset;
+-#else
+-		blockstart = 0;
+-		block_seek = 0;
+-#endif
+ 
+ 		/*
+ 		 * Data size we actually write: from the start of the block

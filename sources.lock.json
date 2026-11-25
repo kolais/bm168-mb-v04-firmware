@@ -1,0 +1,64 @@
+{
+  "lvgl": {
+    "version": "9.2.2",
+    "url": "https://codeload.github.com/lvgl/lvgl/tar.gz/refs/tags/v9.2.2",
+    "file": "lvgl-9.2.2.tar.gz",
+    "sha256": "129b4e00e06639fa79d7e8a6cab3c1ecce2445b1a246652ccd34f22e7b17ad6f"
+  },
+  "inter": {
+    "version": "4.1",
+    "url": "https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip",
+    "file": "Inter-4.1.zip",
+    "sha256": "9883fdd4a49d4fb66bd8177ba6625ef9a64aa45899767dde3d36aa425756b11e",
+    "license": "SIL Open Font License 1.1 (LICENSE.txt in the archive)",
+    "members": [
+      "extras/ttf/Inter-Light.ttf",
+      "extras/ttf/Inter-Regular.ttf",
+      "extras/ttf/Inter-SemiBold.ttf",
+      "LICENSE.txt"
+    ]
+  },
+  "toolchain": {
+    "version": "Bootlin armv7-eabihf musl stable 2024.05-1",
+    "url": "https://toolchains.bootlin.com/downloads/releases/toolchains/armv7-eabihf/tarballs/armv7-eabihf--musl--stable-2024.05-1.tar.xz",
+    "file": "armv7-eabihf--musl--stable-2024.05-1.tar.xz",
+    "sha256": "5b34157a4c9f53064002f12f57c42836cd551c591a4be6a99b3ee201add506aa"
+  },
+  "arkmicro_sdk": {
+    "url": "https://github.com/yogihybo/linux-arkmicro.git",
+    "commit": "ffb07cd15d3abb1f8b4291500f8e8764c5309952",
+    "enabled": true,
+    "status": "enabled: sanitised source for host-only recovery builds; hardware boot and restoration still require validation",
+    "sanitized_commit": "63b44c2d6db2cf800601e947a7c4e18c44e223d1",
+    "sanitized_tree": "6c296d6ae5292d4abbafa5e6c9e953937e022984",
+    "sanitization_manifest": "board/sdk-sanitization.json",
+    "sanitization_manifest_sha256": "8825c403a2b5e4ad6b9f56a604ab37e5c2eca894b0cae80758dd0e60fc08ace6"
+  },
+  "rtl8821cs": {
+    "url": "https://github.com/rockchip-linux/kernel.git",
+    "branch": "develop-4.19",
+    "commit": "f39b590ea11da2d897644e42119ba5099b2eefc8",
+    "path": "drivers/net/wireless/rockchip_wlan/rtl8821cs",
+    "tree": "08c61fe24d5aeca1ab87ca9ffe066c950305efef",
+    "driver_version": "v5.12.0-8-g39bbb8dd2.20201015_COEX20200730-5151",
+    "archive": "dist/wifi/rtl8821cs-f39b590ea11d.tar.gz",
+    "archive_format": "git archive --format=tar <commit> <path> | gzip -n -9",
+    "sha256": "fb6c035afd945047514135c6aa66f65deb2a8bd15d529d4cc70bca79663548b4",
+    "size": 4004514,
+    "license": "GPL-2.0; compiled-in Realtek firmware arrays are a binary dependency",
+    "review": "docs/wifi-driver-source.md"
+  },
+  "toolchain_glibc": {
+    "version": "Bootlin armv7-eabihf glibc stable 2018.11-1 (GCC 7.3.0, glibc 2.27, binutils 2.29.1)",
+    "url": "https://toolchains.bootlin.com/downloads/releases/toolchains/armv7-eabihf/tarballs/armv7-eabihf--glibc--stable-2018.11-1.tar.bz2",
+    "file": "armv7-eabihf--glibc--stable-2018.11-1.tar.bz2",
+    "sha256": "c8d4d3ca70442652e0e72f57ae6e878375640508f1e08de3152f63414c43b2e4",
+    "purpose": "Programs that link stock vendor glibc 2.27 libraries (GPU/display probes, later the UI)"
+  },
+  "dropbear": {
+    "version": "2025.89",
+    "url": "https://matt.ucc.asn.au/dropbear/releases/dropbear-2025.89.tar.bz2",
+    "file": "dropbear-2025.89.tar.bz2",
+    "sha256": "0d1f7ca711cfc336dc8a85e672cab9cfd8223a02fe2da0a4a7aeb58c9e113634"
+  }
+}

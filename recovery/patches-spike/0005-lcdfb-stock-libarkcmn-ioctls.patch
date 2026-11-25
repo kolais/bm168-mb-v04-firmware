@@ -1,0 +1,700 @@
+AUTOTOP: stock libarkcmn display ioctls on the SDK ARK1668 LCDC driver.
+Ported from downstream linux-arkmicro master (fee2b89): the ark1668_lcdc_funcs.c
+and ark_lcdc_common.h changes of 7de9ca1, 13ea456, 42ef123, 6876219, 70d8f65,
+f06c9ef, 12002e7, 7fa48a3 as one reviewed unit; see docs/sdk-import.md.
+
+--- a/drivers/video/fbdev/arkmicro/ark_lcdc_common.h
++++ b/drivers/video/fbdev/arkmicro/ark_lcdc_common.h
+@@ -28,6 +28,25 @@
+ #define ARK_LCDC_WIRING_GRB	4
+ #define ARK_LCDC_WIRING_RGB	5
+ 
++/* DO NOT translate ARK_LCDC_WIRING_* through this enum before writing
++ * it into the LCDC's rgb_order hardware field (OSD1_CTL/OSD2_CTL/
++ * OSD3_CTL bits 18-20, and ARK1668_LCDC_CONTROL's copy of the same
++ * bits) -- a same-day fix (2026-07-24) briefly did exactly that, based
++ * on a debug string found elsewhere in stock's vmlinux.elf ("rgb_order:
++ * 0=rgb, 1=rbg, 2=grb, 3=gbr, 4=brg, 5=bgr") that looked like it should
++ * describe this field's real encoding. It was reverted the same day:
++ * stock's real ark_disp_fb_set_par() (vmlinux.elf @ 0x802e2a40,
++ * checklist section 33's original decompile) derives its hardware
++ * rgb_order value as exactly the wiring-mode enum's own raw value (0
++ * for BGR, 5 for RGB) -- i.e. lcd_wiring_mode should be written
++ * directly, unchanged. The translation produced the opposite value for
++ * both wiring modes actually in use on this board, causing a real,
++ * hardware-confirmed red/blue channel swap in start_msn. See checklist
++ * sections 33, 52, and 58 for the full history -- 52 is the wrong
++ * fix, 58 is the revert. This enum's real, correct use (if any) was
++ * never established; kept here only because ARK1668_LCDC_OSD1_CTL's
++ * comment in ark1668_lcdfb.c cites the same debug string as unresolved
++ * context, not because anything in this tree should construct one. */
+ enum ark_lcdc_rgb_order {
+ 	ARK_LCDC_ORDER_RGB,
+ 	ARK_LCDC_ORDER_RBG,
+@@ -122,6 +141,72 @@
+ 	int reg[6];
+ };
+ 
++/* Real vendor payload used by libarkcmn.so's arkapi_init_fb_display() and
++ * arkapi_init_fb_video_display() (raw ioctls 0x403c4f27 / 0x403c4f37,
++ * confirmed via ARM disassembly of both functions -- identical 60-byte
++ * layout for both). x/y is layer position; screen_width/screen_height is
++ * the rounded full framebuffer size; param6/param7 are validated non-zero
++ * by the caller and are the actual rendered window width/height; the two
++ * hal_field_* members are values userspace itself read back from an
++ * earlier kernel query and is echoing here (kernel only consumes this
++ * struct, never writes it back), so we don't need to interpret them.
++ */
++struct ark_fb_init_display {
++	unsigned int x;
++	unsigned int y;
++	unsigned int right_margin;
++	unsigned int bottom_margin;
++	unsigned int screen_width;
++	unsigned int screen_height;
++	/* Confirmed via Ghidra decompile cross-reference (2026-07-27,
++	 * arkapi_init_fb_video_display()'s sibling arkapi_init_fb_display_internal()
++	 * call passes 0x11 == ARK_LCDC_FORMAT_Y_UV420 in this exact
++	 * positional slot): this is the video layer's pixel format, not
++	 * an opaque param. Previously never read by our ARKFB_INIT_DISPLAY/
++	 * ARKFB_INIT_VIDEO_DISPLAY handler at all -- VIDEO2_CTL's format
++	 * bits were left at whatever stale/POR value was there, producing
++	 * severe green/color-cast corruption once video actually started
++	 * rendering. See docs/DEVICE_TEST_CHECKLIST_2026-07-18.md section 74.
++	 */
++	unsigned int format;
++	unsigned int _reserved0;
++	unsigned int _reserved1;
++	unsigned int param4;
++	unsigned int param5;
++	unsigned int win_width;
++	unsigned int win_height;
++	unsigned int hal_field_1b0;
++	unsigned int hal_field_1a0;
++};
++
++/* Real vendor payload used by libarkcmn.so's arkapi_set_fb_video_addr()
++ * (raw ioctl 0x40104f38, confirmed via ARM disassembly) -- per-frame
++ * video buffer address update for CarPlay/phone-mirroring video.
++ */
++struct ark_fb_set_video_addr {
++	unsigned int y_addr;
++	unsigned int cb_addr;
++	unsigned int cr_addr;
++	unsigned int param5;
++};
++
++/* Real vendor payload for the ARKFB_SET_BLEND ioctl (raw ioctl
++ * 0x40104f29, confirmed via ARM disassembly of stock's real
++ * ark_fb_set_blend() in vmlinux.elf -- see
++ * docs/DEVICE_TEST_CHECKLIST_2026-07-18.md section 65). Target layer is
++ * whichever /dev/fbN the fd was opened against, same as every other
++ * ioctl here -- not part of this struct. alpha is a single byte; the
++ * remaining 3 bytes are implicit padding from the preceding int fields
++ * (struct size is exactly 16 bytes both ways, confirmed against the
++ * ioctl's own encoded size field).
++ */
++struct ark_fb_blend {
++	int alpha_blend_en;
++	int per_pix_alpha_blend_en;
++	int blend_mode;
++	unsigned char alpha;
++};
++
+ struct ark_disp_atomic {
+ 	 int layer;
+ 	 int atomic_stat;
+@@ -162,7 +247,76 @@
+ #define ARKFB_GET_VP_INFO				ARK_IOW(55, struct ark_disp_vp)
+ #define ARKFB_SET_WINDOW_PRIORITY		ARK_IOW(63, unsigned int)
+ 
++/* Stock's real vendor ioctl numbering (confirmed via vmlinux.elf disassembly,
++ * see docs/DEVICE_TEST_CHECKLIST_2026-07-18.md) assigns bare ARK_IO(44) as
++ * ARKFB_HIDE_WINDOW -- not our reconstructed ARK_IO(40). This collides in
++ * name only with ARKFB_SET_WINDOW_ADDR above (that's an _IOW encoding, a
++ * different 32-bit value, so no actual numeric collision). Userspace
++ * (MsnCoreApp/libarkcmn.so) was built against the real headers and calls
++ * this number, so we must also handle it.
++ */
++#define ARKFB_HIDE_WINDOW_REAL			ARK_IO(44)
+ 
++/* Same story for SHOW_WINDOW: stock's real ark_disp_fb_ioctl dispatches
++ * bare ARK_IO(43) (0x4f2b) to ark_fb_show_window, not our reconstructed
++ * ARK_IO(39). libarkcmn.so's arkapi_show_fb() (used by both the CarPlay
++ * DirectFB path and the AndroidAuto `sink` daemon) calls this number.
++ */
++#define ARKFB_SHOW_WINDOW_REAL			ARK_IO(43)
++
++/* Real vendor ioctls issued by libarkcmn.so's arkapi_init_fb_display()
++ * (PRIMARY_LAYER) / arkapi_init_fb_video_display() (VIDEO_LAYER), and
++ * arkapi_set_fb_video_addr() -- confirmed via ARM disassembly, see
++ * docs/DEVICE_TEST_CHECKLIST_2026-07-18.md. These share nr with existing
++ * macros above (39/55/56) but differ in dir/size, so the resulting
++ * 32-bit ioctl numbers do not collide.
++ */
++#define ARKFB_INIT_DISPLAY				ARK_IOW(39, struct ark_fb_init_display)
++#define ARKFB_INIT_VIDEO_DISPLAY		ARK_IOW(55, struct ark_fb_init_display)
++#define ARKFB_SET_VIDEO_ADDR_RAW		ARK_IOW(56, struct ark_fb_set_video_addr)
++
++/* Real vendor ioctl for dynamically configuring a layer's blend
++ * parameters (alpha_blend_en, per_pix_alpha_blend_en, blend_mode,
++ * layer alpha), confirmed 0x40104f29 via ARM disassembly of stock's
++ * real ark_fb_set_blend() -- see docs/DEVICE_TEST_CHECKLIST_2026-07-18.md
++ * section 65. Shares nr with ARKFB_SET_WINDOW_POS (41) above, but
++ * differs in size (16 bytes vs 4), so the resulting 32-bit ioctl
++ * numbers do not collide -- same pattern as ARKFB_INIT_DISPLAY etc.
++ */
++#define ARKFB_SET_BLEND					ARK_IOW(41, struct ark_fb_blend)
++
++/* Real vendor ioctl, confirmed via its own "ARKFB_GET_LAYER_ID fail."
++ * error string in libarkcmn.so's rodata (0x80044f39 = _IOR('O', 57,
++ * int)) -- queries which layer a given /dev/fbN fd corresponds to.
++ * Called by arkapi_init_fb_display_internal() during video-layer
++ * init; non-fatal on failure (caller just logs and continues,
++ * confirmed via disassembly), but was previously entirely
++ * unimplemented ("unknown ioctl 80044f39" in dmesg). Shares nr with
++ * VIN_SET_WINDOW_POS (57) below, but differs in dir/size (bare _IO
++ * vs _IOR with a 4-byte payload), so the resulting 32-bit ioctl
++ * numbers do not collide -- same pattern as ARKFB_SET_BLEND/
++ * ARKFB_SET_WINDOW_POS above. See
++ * docs/DEVICE_TEST_CHECKLIST_2026-07-18.md section 67.
++ */
++#define ARKFB_GET_LAYER_ID				ARK_IOR(57, int)
++
++/* Real vendor ioctls issued by libarkcmn.so's arkapi_set_fb_addr()/
++ * arkapi_get_fb_addr() -- confirmed 0x40104f2a/0x80104f36 via Ghidra
++ * decompile of the real deployed libarkcmn.so. This is a SEPARATE,
++ * generic address-update path from ARKFB_SET_VIDEO_ADDR_RAW (nr 56)
++ * above -- observed live on hardware (2026-07-27): `sink`'s video
++ * layer (fd for the video-layer /dev/fbN, layer id 4) calls this one
++ * in a tight per-frame loop (arkapi_get_fb_addr x2 as a "did the HW
++ * latch the previous address yet" poll, then arkapi_set_fb_addr's own
++ * ioctl once), not the nr-56 path. Same 4-word {y,cb,cr,param5} shape
++ * as ark_fb_set_video_addr, so it reuses that struct. Shares nr with
++ * ARKFB_SET_WINDOW_SIZE (42)/ARKFB_SET_VP_INFO (54) above, but differs
++ * in size/dir, so the resulting 32-bit ioctl numbers do not collide.
++ * See docs/DEVICE_TEST_CHECKLIST_2026-07-18.md section 73.
++ */
++#define ARKFB_SET_FB_ADDR				ARK_IOW(42, struct ark_fb_set_video_addr)
++#define ARKFB_GET_FB_ADDR				ARK_IOR(54, struct ark_fb_set_video_addr)
++
+ #define VIN_SHOW_WINDOW	        			ARK_IO(55)
+ #define VIN_HIDE_WINDOW	        			ARK_IO(56)
+ #define VIN_SET_WINDOW_POS					ARK_IO(57)
+--- a/drivers/video/fbdev/arkmicro/ark1668_lcdc_funcs.c
++++ b/drivers/video/fbdev/arkmicro/ark1668_lcdc_funcs.c
+@@ -696,15 +696,169 @@
+         default:
+                 return;
+         }
++
++        if (enable)
++                val |= 1 << pos;
++        else
++                val &= ~(1 << pos);
++        writel(val, lcdc_base + ARK1668_LCDC_MODE_LCD_REG1);
++}
++
++/* ark1668 fix (2026-07-25): real vendor ARKFB_SET_BLEND ioctl (0x40104f29,
++ * confirmed via ARM disassembly of stock's real ark_fb_set_blend() in
++ * vmlinux.elf -- see docs/DEVICE_TEST_CHECKLIST_2026-07-18.md section 65)
++ * was entirely unhandled by this driver. libarkcmn.so's real callers were
++ * never traced directly, but stock's kernel only ever calls the
++ * per-layer alpha_blend_en/per_pix_alpha_blend_en/blend_mode/alpha
++ * setters below (which already existed for OSD, added here for VIDEO)
++ * from inside this exact ioctl and a debug-only sscanf interface --
++ * meaning these fields are never set anywhere else in stock's own boot
++ * path (U-Boot doesn't touch them for VIDEO at all, confirmed via its
++ * real source), so this ioctl not existing meant VIDEO's blend config
++ * was stuck at raw hardware-reset default on our reconstruction,
++ * unlike stock which (if this ioctl is genuinely called by real
++ * userspace) ends up at a confirmed-live value of alpha_blend_en=0,
++ * per_pix_alpha_blend_en=0 (use fixed layer alpha, not pixel alpha --
++ * video frame data has no meaningful alpha channel), blend_mode=0,
++ * alpha=0xff (fully opaque) -- i.e. VIDEO drawn as a simple, always-
++ * opaque layer with no blending consideration at all. Below are the
++ * missing primitives; the ioctl handler itself is further down in
++ * ark1668_lcdfb_ioctl(). */
++
++static void ark1668_lcdc_set_video_alpha_blend_en_lcd(int id, int enable)
++{
++        unsigned int pos;
++        unsigned int val;
++
++        if (id < 0 || id > VIDEO_LAYER2) return;
++
++        val = readl(lcdc_base + ARK1668_LCDC_MODE_LCD_REG1);
++
++        /* video=bit11, video2=bit9 -- confirmed via disassembly, NOT a
++         * simple id*2+9 pattern (video2 is lower, not higher, than video). */
++        pos = (id == VIDEO_LAYER1) ? 11 : 9;
++
++        if (enable)
++                val |= 1 << pos;
++        else
++                val &= ~(1 << pos);
++
++        writel(val, lcdc_base + ARK1668_LCDC_MODE_LCD_REG1);
++}
++
++static void ark1668_lcdc_set_video_per_pix_alpha_blend_en_lcd(int id, int enable)
++{
++        unsigned int pos;
++        unsigned int val;
++
++        if (id < 0 || id > VIDEO_LAYER2) return;
++
++        val = readl(lcdc_base + ARK1668_LCDC_MODE_LCD_REG1);
++
++        /* video=bit10, video2=bit8 -- confirmed via disassembly. */
++        pos = (id == VIDEO_LAYER1) ? 10 : 8;
+ 
+         if (enable)
+                 val |= 1 << pos;
+         else
+                 val &= ~(1 << pos);
++
+         writel(val, lcdc_base + ARK1668_LCDC_MODE_LCD_REG1);
+ }
+ 
++static void ark1668_lcdc_set_osd_blend_mode(int id, unsigned int mode)
++{
++        unsigned int pos;
++        unsigned int val;
+ 
++        switch (id)
++        {
++        case OSD_LAYER1:
++                pos = 12;
++                break;
++        case OSD_LAYER2:
++                pos = 20;
++                break;
++        case OSD_LAYER3:
++                pos = 28;
++                break;
++        default:
++                return;
++        }
++
++        val = readl(lcdc_base + ARK1668_LCDC_MODE_LCD_REG0);
++        val &= ~(0xf << pos);
++        val |= (mode & 0xf) << pos;
++        writel(val, lcdc_base + ARK1668_LCDC_MODE_LCD_REG0);
++}
++
++static void ark1668_lcdc_set_video_blend_mode(int id, unsigned int mode)
++{
++        unsigned int val;
++
++        if (id < 0 || id > VIDEO_LAYER2) return;
++
++        /* video's blend_mode lives in MODE_LCD_REG0 bits[7:4]; video2's
++         * lives in MODE_LCD_REG1 bits[7:4] -- a different register per
++         * layer, confirmed via disassembly, not just a different bit
++         * offset within the same register like every other field here. */
++        if (id == VIDEO_LAYER1) {
++                val = readl(lcdc_base + ARK1668_LCDC_MODE_LCD_REG0);
++                val &= ~(0xf << 4);
++                val |= (mode & 0xf) << 4;
++                writel(val, lcdc_base + ARK1668_LCDC_MODE_LCD_REG0);
++        } else {
++                val = readl(lcdc_base + ARK1668_LCDC_MODE_LCD_REG1);
++                val &= ~(0xf << 4);
++                val |= (mode & 0xf) << 4;
++                writel(val, lcdc_base + ARK1668_LCDC_MODE_LCD_REG1);
++        }
++}
++
++static void ark1668_lcdc_set_osd_alpha(int id, unsigned int alpha)
++{
++        unsigned int reg;
++        unsigned int val;
++
++        switch (id)
++        {
++        case OSD_LAYER1:
++                reg = ARK1668_LCDC_OSD1_CTL;
++                break;
++        case OSD_LAYER2:
++                reg = ARK1668_LCDC_OSD2_CTL;
++                break;
++        case OSD_LAYER3:
++                reg = ARK1668_LCDC_OSD3_CTL;
++                break;
++        default:
++                return;
++        }
++
++        val = readl(lcdc_base + reg);
++        val &= ~0xff;
++        val |= alpha & 0xff;
++        writel(val, lcdc_base + reg);
++}
++
++static void ark1668_lcdc_set_video_alpha(int id, unsigned int alpha)
++{
++        unsigned int val;
++
++        if (id < 0 || id > VIDEO_LAYER2) return;
++
++        val = readl(lcdc_base + ARK1668_LCDC_VIDEO_VIDEO2_BLD_COEF);
++        if (id == VIDEO_LAYER1) {
++                val &= ~0xff;
++                val |= alpha & 0xff;
++        } else {
++                val &= ~(0xff << 8);
++                val |= (alpha & 0xff) << 8;
++        }
++        writel(val, lcdc_base + ARK1668_LCDC_VIDEO_VIDEO2_BLD_COEF);
++}
++
++
+ int ark_bootanimation_display_init(int width, int height, unsigned int addr)
+ {
+ 	ark1668_lcdc_set_osd_size(OSD_LAYER2, width, height);
+@@ -1055,6 +1209,7 @@
+             break;
+             
+         case ARKFB_SHOW_WINDOW:
++        case ARKFB_SHOW_WINDOW_REAL:
+ 
+                 if(layer <= OSD_LAYER3)
+                         ark1668_lcdc_set_osd_en(layer, 1);
+@@ -1065,6 +1220,14 @@
+                 break;
+             
+         case ARKFB_HIDE_WINDOW:
++        case ARKFB_HIDE_WINDOW_REAL:
++                /* ARKFB_HIDE_WINDOW_REAL (real vendor ioctl 0x4f2c) is stock's
++                 * actual HIDE_WINDOW number; stock gates it on carback (reversing
++                 * camera) status, refusing to hide while carback is active. We
++                 * have no CONFIG_ARK_CARBACK support built in (see .config), so
++                 * always hide -- matches stock behavior for the non-carback case,
++                 * which is the only case this build can hit anyway.
++                 */
+                 if(layer <= OSD_LAYER3)
+                         ark1668_lcdc_set_osd_en(layer, 0);
+                 else
+@@ -1326,11 +1489,319 @@
+ 
+         }
+         break;
++
++        case ARKFB_INIT_DISPLAY:
++        case ARKFB_INIT_VIDEO_DISPLAY:
++        {
++                /* Real init call from libarkcmn.so's arkapi_init_fb_display()/
++                 * arkapi_init_fb_video_display(), see ark_fb_init_display
++                 * comment in ark_lcdc_common.h. Drive it through the same
++                 * position/size/scaler primitives ARKFB_SET_WINDOW_POS and
++                 * ARKFB_SET_WINDOW_SIZE already use.
++                 */
++                struct ark_fb_init_display init;
++
++                if(copy_from_user(&init, (void *)arg, sizeof(init))){
++                        printk("%s: copy from user para error\n", __func__);
++                        error = -EFAULT;
++                        goto end;
++                }
++
++                if(init.win_width == 0 || init.win_height == 0){
++                        printk("%s: ARKFB_INIT_DISPLAY zero window size\n", __func__);
++                        error = -EINVAL;
++                        goto end;
++                }
++
++                if(layer <= OSD_LAYER3){
++                        /* Real gap found 2026-07-24: this is the ONLY init-time
++                         * hook that actually runs for OSD2/OSD3 (/dev/fb1,
++                         * /dev/fb2) -- ark1668_lcdfb_probe()'s registration loop
++                         * for fb1-fb4 memcpy's fb0's struct fb_info and calls
++                         * register_framebuffer() directly, never fb_set_par(),
++                         * so the OSD1-specific rgb_order fix in
++                         * ark1668_lcdfb_set_par() (see that file) never runs
++                         * for these layers at all. Set format+rgb_order here
++                         * too, matching the same wiring_mode derivation, so
++                         * every OSD layer that goes through this real call path
++                         * (libarkcmn.so's arkapi_init_fb_display()) ends up
++                         * correctly configured regardless of which /dev/fbN it
++                         * targets. RGBA888 is the only format OSD layers (UI
++                         * overlay content) are ever used with -- unlike
++                         * VIDEO_LAYER1/2 below, whose format is genuinely
++                         * content-dependent (RGB or YUV depending on the
++                         * decoder), so deliberately NOT touched here. See
++                         * docs/DEVICE_TEST_CHECKLIST_2026-07-18.md section 36.
++                         */
++                        /* FIXED AGAIN 2026-07-25 (checklist section 66):
++                         * rgb_order hardcoded to 0, matching U-Boot's real
++                         * bootlogo -- see ark1668_lcdfb.c's matching comment.
++                         * Not derived from lcd_wiring_mode at all anymore.
++                         */
++                        ark1668_lcdc_set_osd_format(layer, ARK1668_LCDC_FORMAT_RGBA888,
++                                                     0, 0);
++                        ark1668_lcdc_set_osd_pos(layer, init.x, init.y);
++                        ark1668_lcdc_set_osd_size(layer, init.win_width, init.win_height);
++                }else{
++                        int vlayer = layer - OSD_LAYER_MAX;
++
++                        /* Real gap found 2026-07-27 (checklist section 74):
++                         * this init call was never setting the video layer's
++                         * pixel format at all -- VIDEO2_CTL's format bits
++                         * stayed at whatever stale/POR value was there,
++                         * producing severe green/color-cast corruption once
++                         * video actually started rendering (root-caused via
++                         * a live on-hardware photo showing legible but
++                         * heavily green-tinted Android Auto content). The
++                         * real decoder output is semi-planar YUV420 (NV12,
++                         * ARK_LCDC_FORMAT_Y_UV420=0x11) -- confirmed by
++                         * cross-referencing libarkcmn.so's own sibling
++                         * OSD-layer init call, which passes that exact value
++                         * in the same struct position. yuv_order/rgb_order
++                         * are irrelevant for Y_UV420 (set_video_format
++                         * derives its own y_uv_order bit from the format
++                         * value), so pass 0 for both.
++                         *
++                         * scal_bypass=1: this call site always programs the
++                         * scaler's source size and window size from the SAME
++                         * init.win_width/win_height (see the
++                         * set_video_source_size/set_video_win_size calls
++                         * below) -- source and destination are structurally
++                         * always identical (1:1, no scaling) on this path, so
++                         * the scaler engine (and its chroma FIR low-pass
++                         * filter, active whenever the scaler isn't bypassed)
++                         * should never actually be engaged. Real user-visible
++                         * bug found 2026-07-27: with scal_bypass=0 (the
++                         * previous, un-set default), a real on-screen
++                         * crosshatch/weave texture was visible over live AA
++                         * video content -- exactly the kind of artifact a
++                         * needlessly-active 1:1 chroma scaler/FIR path would
++                         * produce. See checklist section 75.
++                         */
++                        ark1668_lcdc_set_video_format(vlayer, init.format, 0, 0, 1);
++
++                        ark1668_lcdc_set_video_layer_pos(vlayer, init.x, init.y);
++                        ark1668_lcdc_set_video_source_size(vlayer, init.win_width, init.win_height);
++                        ark1668_lcdc_set_video_win_size(vlayer, init.win_width, init.win_height);
++                        ark1668_lcdc_set_video_win_point(vlayer, 0, 0);
++                        ark1668_lcdc_set_video_layer_size(vlayer, init.win_width, init.win_height);
++                        ark1668_lcdc_set_video_scal(vlayer, init.win_width, init.win_height,
++                                                     0, 0, 0, 0, init.win_width, init.win_height, 0, 0);
++
++                        /* ark1668 fix (2026-07-25): apply stock's confirmed-live
++                         * blend config as a static default here too, not just
++                         * via the new ARKFB_SET_BLEND ioctl handler -- U-Boot
++                         * never touches VIDEO's alpha_blend_en/per_pix_alpha_blend_en
++                         * bits at all (confirmed absent from its real source),
++                         * so without this, VIDEO_LAYER's blend state would be
++                         * raw hardware-reset default (unknown, possibly wrong)
++                         * unless userspace happens to call ARKFB_SET_BLEND
++                         * itself, which was never confirmed either way. This
++                         * belt-and-braces default matches stock's real live
++                         * MODE_LCD_REG1 dump exactly: alpha_blend_en=0,
++                         * per_pix_alpha_blend_en=0 (fixed layer alpha, not
++                         * pixel alpha -- decoded video frame data has no
++                         * meaningful alpha channel), blend_mode=0, alpha=0xff
++                         * (fully opaque) -- VIDEO drawn as a simple, always-
++                         * visible layer with no blending consideration. See
++                         * docs/DEVICE_TEST_CHECKLIST_2026-07-18.md section 65.
++                         */
++                        ark1668_lcdc_set_video_alpha_blend_en_lcd(vlayer, 0);
++                        ark1668_lcdc_set_video_per_pix_alpha_blend_en_lcd(vlayer, 0);
++                        ark1668_lcdc_set_video_blend_mode(vlayer, 0);
++                        ark1668_lcdc_set_video_alpha(vlayer, 0xff);
++                }
++
++                printk(KERN_DEBUG "layer=%d: init display x=%d, y=%d, w=%d, h=%d.\n ",
++                       layer, init.x, init.y, init.win_width, init.win_height);
++        }
++        break;
++
++        case ARKFB_SET_VIDEO_ADDR_RAW:
++        {
++                /* Real per-frame update from libarkcmn.so's
++                 * arkapi_set_fb_video_addr(), see ark_fb_set_video_addr
++                 * comment in ark_lcdc_common.h. Stock queues this through an
++                 * IRQ-driven wait-queue buffer pipeline (ark_video_update_window
++                 * in vmlinux.elf); we don't replicate that private kernel-side
++                 * machinery -- only the userspace ioctl ABI has to match. Write
++                 * the address directly so the latest frame is shown as soon as
++                 * possible, which is the right tradeoff for a live video feed.
++                 */
++                struct ark_fb_set_video_addr vaddr;
++
++                if(layer <= OSD_LAYER3){
++                        printk("%s: ARKFB_SET_VIDEO_ADDR_RAW on non-video layer\n", __func__);
++                        error = -EINVAL;
++                        goto end;
++                }
++
++                if(copy_from_user(&vaddr, (void *)arg, sizeof(vaddr))){
++                        printk("%s: copy from user para error\n", __func__);
++                        error = -EFAULT;
++                        goto end;
++                }
++
++                /* ark1668 fix (2026-07-28): was spin_lock_irqsave, disabling
++                 * ALL interrupts on this CPU (including audio's) for the
++                 * duration -- pointlessly, since ark1668_lcdfb_interrupt()
++                 * (the vsync IRQ handler) calls this exact same
++                 * set_video_addr() function from IRQ context without taking
++                 * sinfo->lock at all. This lock never protected against that
++                 * real concurrent writer; it only ever serialized against
++                 * another ioctl call, which doesn't need IRQs disabled to do
++                 * safely. Downgraded to a plain spinlock -- this ioctl now
++                 * fires ~30x/sec (once per AA video frame), so the removed
++                 * IRQ-disable window was a real, regular, avoidable cost.
++                 * See docs/AUDIO_SUBSYSTEM_INVESTIGATION.md.
++                 */
++                spin_lock(&sinfo->lock);
++                ark1668_lcdc_set_video_addr(layer - OSD_LAYER_MAX, vaddr.y_addr, vaddr.cb_addr, vaddr.cr_addr);
++                spin_unlock(&sinfo->lock);
++        }
++        break;
++
++        case ARKFB_SET_BLEND:
++        {
++                /* Real vendor ioctl, previously entirely unhandled -- see
++                 * the block comment above ark1668_lcdc_set_video_alpha_blend_en_lcd()
++                 * earlier in this file for the full trace and why this
++                 * matters for VIDEO_LAYER (CarPlay/Android Auto video)
++                 * specifically. Target layer is whichever /dev/fbN this
++                 * fd was opened against, same as every other ioctl here.
++                 */
++                struct ark_fb_blend blend;
++
++                if(copy_from_user(&blend, (void *)arg, sizeof(blend))){
++                        printk("%s: copy from user para error\n", __func__);
++                        error = -EFAULT;
++                        goto end;
++                }
++
++                if(layer <= OSD_LAYER3){
++                        ark1668_lcdc_set_osd_alpha_blend_en_lcd(layer, blend.alpha_blend_en);
++                        ark1668_lcdc_set_osd_per_pix_alpha_blend_en_lcd(layer, blend.per_pix_alpha_blend_en);
++                        ark1668_lcdc_set_osd_blend_mode(layer, blend.blend_mode);
++                        ark1668_lcdc_set_osd_alpha(layer, blend.alpha);
++                }else{
++                        int vlayer = layer - OSD_LAYER_MAX;
++
++                        ark1668_lcdc_set_video_alpha_blend_en_lcd(vlayer, blend.alpha_blend_en);
++                        ark1668_lcdc_set_video_per_pix_alpha_blend_en_lcd(vlayer, blend.per_pix_alpha_blend_en);
++                        ark1668_lcdc_set_video_blend_mode(vlayer, blend.blend_mode);
++                        ark1668_lcdc_set_video_alpha(vlayer, blend.alpha);
++                }
++        }
++        break;
++
++        case ARKFB_GET_LAYER_ID:
++        {
++                /* Real vendor ioctl (0x80044f39, confirmed via its own
++                 * "ARKFB_GET_LAYER_ID fail." string in libarkcmn.so),
++                 * previously entirely unhandled -- see the macro comment
++                 * in ark_lcdc_common.h. Simply reports back which layer
++                 * this fd corresponds to, same value already computed
++                 * from the minor number at the top of this function.
++                 */
++                if(copy_to_user((void *)arg, &layer, sizeof(layer))){
++                        printk("%s: copy to user para error\n", __func__);
++                        error = -EFAULT;
++                        goto end;
++                }
++        }
++        break;
++
++        case ARKFB_SET_FB_ADDR:
++        {
++                /* Real vendor ioctl from libarkcmn.so's arkapi_set_fb_addr()
++                 * -- the address-update path actually exercised by `sink`'s
++                 * video layer per frame (0x40104f2a), separate from
++                 * ARKFB_SET_VIDEO_ADDR_RAW above. See the macro comment in
++                 * ark_lcdc_common.h.
++                 */
++                struct ark_fb_set_video_addr vaddr;
++                struct ark_disp_addr queued;
++
++                if(layer <= OSD_LAYER3){
++                        printk("%s: ARKFB_SET_FB_ADDR on non-video layer\n", __func__);
++                        error = -EINVAL;
++                        goto end;
++                }
++
++                if(copy_from_user(&vaddr, (void *)arg, sizeof(vaddr))){
++                        printk("%s: copy from user para error\n", __func__);
++                        error = -EFAULT;
++                        goto end;
++                }
++
++                /* 2026-08-18 fix: this used to call
++                 * ark1668_lcdc_set_video_addr() directly, right here,
++                 * synchronously with the ioctl -- writing the hardware
++                 * address register immediately, with no vsync gating at
++                 * all. That's a real, confirmed-on-hardware tearing/
++                 * corruption bug: a write landing mid-scanout corrupts
++                 * whatever portion of the frame the LCDC hasn't scanned
++                 * out yet, worse under bursts of rapid address updates
++                 * (interaction-driven UI redraws). ARKFB_SET_WINDOW_ADDR
++                 * (the OSD/legacy path, case above) already does this
++                 * correctly: it queues into sinfo->render_addr[layer] and
++                 * lets ark1668_lcdfb_interrupt() (the real vsync IRQ
++                 * handler) apply it exactly once per frame, synchronized
++                 * to the panel's own refresh. This ioctl (the one AA video
++                 * actually uses, confirmed via decompile of the real
++                 * vendor userspace) never got the same treatment when it
++                 * was added -- an oversight in this reconstruction, not
++                 * something inherited from a real vendor kernel we have no
++                 * source for. Fixed to match: queue the address the same
++                 * way ARKFB_SET_WINDOW_ADDR does, instead of writing the
++                 * register directly.
++                 */
++                queued.yaddr = vaddr.y_addr;
++                queued.cbaddr = vaddr.cb_addr;
++                queued.craddr = vaddr.cr_addr;
++                queued.wait_vsync = vaddr.param5;
++
++                spin_lock(&sinfo->lock);
++                memcpy(&sinfo->render_addr[layer], &queued, sizeof(queued));
++                spin_unlock(&sinfo->lock);
++        }
++        break;
++
++        case ARKFB_GET_FB_ADDR:
++        {
++                /* GET counterpart of ARKFB_SET_FB_ADDR above -- libarkcmn.so's
++                 * arkapi_get_fb_addr() polls this to check whether the
++                 * hardware has latched a previously-set address before
++                 * writing the next one (0x80104f36). Same spin_lock
++                 * downgrade rationale -- this is the *other* half of the
++                 * ~30x/sec per-frame pair (called twice per frame here,
++                 * vs SET_FB_ADDR's once).
++                 */
++                struct ark_fb_set_video_addr vaddr = { 0, 0, 0, 0 };
++
++                if(layer <= OSD_LAYER3){
++                        printk("%s: ARKFB_GET_FB_ADDR on non-video layer\n", __func__);
++                        error = -EINVAL;
++                        goto end;
++                }
++
++                spin_lock(&sinfo->lock);
++                ark1668_lcdc_get_video_addr(layer - OSD_LAYER_MAX, &vaddr.y_addr, &vaddr.cb_addr, &vaddr.cr_addr);
++                spin_unlock(&sinfo->lock);
++
++                if(copy_to_user((void *)arg, &vaddr, sizeof(vaddr))){
++                        printk("%s: copy to user para error\n", __func__);
++                        error = -EFAULT;
++                        goto end;
++                }
++        }
++        break;
++
+         default:
+             printk("%s %d: unknown ioctl %08x\n",__FUNCTION__, __LINE__, cmd);
+             break;
+-    }    
+-    
++    }
++
+ end:
+         
+     return error;

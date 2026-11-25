@@ -1,0 +1,188 @@
+--- a/tools/crc/crc.cpp
++++ b/tools/crc/crc.cpp
+@@ -133,33 +133,53 @@
+ }
+ int main(int argc, char *argv[])
+ {
+-//	SYS_INFO sys_info;
+-	unsigned int checksum = 0;
+-	FILE *fp1;
+-	FILE *fp = fopen(argv[1], "rb+");
+-	if (fp != NULL) {
+-		fseek(fp, 0, SEEK_END);
+-		long int filesize = ftell(fp);
+-		fseek(fp, 0, SEEK_SET);
+-		unsigned char *buf = (unsigned char*)malloc(filesize);
+-		if (buf) {
+-			if (fread(buf, 1, filesize, fp) != filesize) {
+-				printf("read file fail.\n");
+-				fclose(fp);
+-				return 0;
+-			}
+-//			memset(&sys_info, 0, sizeof(sys_info));
+-			checksum = crc32(0, buf, filesize);
+-			fclose(fp);
+-		}
+-	}
+-	printf(">>>>>>>>>>>>>checksum = 0x%x\n",checksum);
+-	fp1 = fopen("crcdata.bin", "rb+");
+-	if(fp1 != NULL)
+-	{
+-		fseek(fp1, 0, SEEK_END);
+-		fwrite(&checksum, sizeof(unsigned int), 1, fp1);
+-		fclose(fp1);
+-	}
+-	return 0;
++    unsigned char buffer[65536];
++    unsigned int checksum = 0xffffffffu;
++    size_t count;
++    FILE *input;
++    FILE *output;
++    unsigned char record[4];
++
++    if (argc != 2) {
++        fprintf(stderr, "Usage: %s input-file\n", argv[0]);
++        return 2;
++    }
++    input = fopen(argv[1], "rb");
++    if (input == NULL) {
++        perror(argv[1]);
++        return 1;
++    }
++    while ((count = fread(buffer, 1, sizeof(buffer), input)) != 0)
++        checksum = xcrc32(buffer, (int)count, checksum);
++    if (ferror(input)) {
++        perror("read input");
++        fclose(input);
++        return 1;
++    }
++    if (fclose(input) != 0) {
++        perror("close input");
++        return 1;
++    }
++    checksum ^= 0xffffffffu;
++    /* Vendor records are four little-endian bytes, independent of host ABI. */
++    record[0] = (unsigned char)checksum;
++    record[1] = (unsigned char)(checksum >> 8);
++    record[2] = (unsigned char)(checksum >> 16);
++    record[3] = (unsigned char)(checksum >> 24);
++    output = fopen("crcdata.bin", "ab");
++    if (output == NULL) {
++        perror("crcdata.bin");
++        return 1;
++    }
++    if (fwrite(record, 1, sizeof(record), output) != sizeof(record)) {
++        perror("write CRC record");
++        fclose(output);
++        return 1;
++    }
++    if (fclose(output) != 0) {
++        perror("close CRC record");
++        return 1;
++    }
++    printf("checksum = 0x%08x\n", checksum);
++    return 0;
+ }
+--- a/tools/crc/crc.sh
++++ b/tools/crc/crc.sh
+@@ -1,17 +1,25 @@
+ #!/bin/sh
+-rm crcdata.bin
+-touch crcdata.bin
+-echo "crc32app u-boot"
+-./crc32app u-boot.img
+-echo "crc32app fdt"
+-./crc32app *.dtb
+-echo "crc32app zImage"
+-./crc32app zImage
+-echo "crc32app rootfs"
+-./crc32app rootfs*
+-echo "crc32app bootanimation"
+-./crc32app bootanimation
+-echo "crc32app ubootspl"
+-./crc32app ubootspl.bin
+-echo "crc32app bootlogo"
+-./crc32app bootlogo
++set -eu
++
++# Keep the vendor's seven positional records. Missing optional images use zero;
++# unreadable files and ambiguous wildcard matches must stop packaging.
++append_optional() {
++    if [ "$#" -ne 1 ]; then
++        echo "CRC image pattern matched more than one file" >&2
++        return 1
++    fi
++    if [ -e "$1" ] || [ -L "$1" ]; then
++        ./crc32app "$1"
++    else
++        printf '\000\000\000\000' >> crcdata.bin
++    fi
++}
++
++: > crcdata.bin
++append_optional u-boot.img
++append_optional *.dtb
++append_optional zImage
++append_optional rootfs*
++append_optional bootanimation
++append_optional ubootspl.bin
++append_optional bootlogo
+--- a/build/build.sh
++++ b/build/build.sh
+@@ -113,17 +113,12 @@
+ 		exit $?
+ 	fi
+ elif [ "$2" == "build" ] ; then
+-	if [ ! -d $TOOLCHAIN_DIR/$TOOLCHAIN_NAME ] ; then
+-		mkdir -p $TOOLCHAIN_DIR
+-		xz -vkd $TOOLCHAIN_PACKAGE_DIR/$TOOLCHAIN_NAME.tar.xz
+-		tar -xvf $TOOLCHAIN_PACKAGE_DIR/$TOOLCHAIN_NAME.tar -C $TOOLCHAIN_DIR
+-		rm -rf $TOOLCHAIN_PACKAGE_DIR/$TOOLCHAIN_NAME.tar
+-	fi
+-	source $SDK_DIR/env.source
++	source "$SDK_DIR/env.source"
+ 	mkdir -p $IMAGES_DIR
+ 	cp -rf $SDK_DIR/bootstrap/${BOOTSTRAP_DIR}/* $IMAGES_DIR
+ 	cp -rf $SDK_DIR/tools/crc/crc.sh   $IMAGES_DIR
+-	cp -rf $SDK_DIR/tools/crc/crc32app $IMAGES_DIR
++	"${HOSTCC:-/usr/bin/cc}" -x c -std=c99 -O2 \
++		"$SDK_DIR/tools/crc/crc.cpp" -o "$IMAGES_DIR/crc32app"
+ 	if [ "$3" == "" ] ; then
+ 		echo "build all..."
+ 		ubootbuild
+@@ -160,13 +155,7 @@
+ 		exit $?
+ 	fi
+ elif [ "$2" == "config" ] ; then
+-	if [ ! -d $TOOLCHAIN_DIR/$TOOLCHAIN_NAME ] ; then
+-		mkdir -p $TOOLCHAIN_DIR
+-		xz -vkd $TOOLCHAIN_PACKAGE_DIR/$TOOLCHAIN_NAME.tar.xz
+-		tar -xvf $TOOLCHAIN_PACKAGE_DIR/$TOOLCHAIN_NAME.tar -C $TOOLCHAIN_DIR
+-		rm -rf $TOOLCHAIN_PACKAGE_DIR/$TOOLCHAIN_NAME.tar
+-	fi
+-	source $SDK_DIR/env.source
++	source "$SDK_DIR/env.source"
+ 	if [ "$3" == "uboot" ] ; then
+ 		echo "config u-boot..."
+ 		ubootconfig
+--- a/env.source
++++ b/env.source
+@@ -1,10 +1,12 @@
+ #!/bin/bash
+ 
+-export SOURCE_PATH=$(cd `dirname $BASH_SOURCE`;pwd)
+-if [ -d ${SOURCE_PATH}/buildroot-external/toolchain/gcc-linaro-7.3.1-2018.05-x86_64_arm-linux-gnueabihf ]; then
+-export PATH=${SOURCE_PATH}/buildroot-external/toolchain/gcc-linaro-7.3.1-2018.05-x86_64_arm-linux-gnueabihf/bin:$PATH
+-else
+-export PATH=${SOURCE_PATH}/buildroot-external/toolchain/gcc-linaro-7.4.1-2019.02-x86_64_arm-linux-gnueabihf/bin:$PATH
++# The audit build must choose a reviewed compiler explicitly; never fall back
++# to a bundled toolchain or whichever compiler happens to be on PATH.
++if [[ "${CROSS_COMPILE:-}" != /* ]] || [[ ! -x "${CROSS_COMPILE}gcc" ]]; then
++    echo "Set CROSS_COMPILE to an absolute, reviewed compiler prefix" >&2
++    return 1 2>/dev/null || exit 1
+ fi
+-export CROSS_COMPILE=arm-linux-gnueabihf-
++export SOURCE_PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
++export PATH="$(dirname -- "$CROSS_COMPILE"):$PATH"
++export CROSS_COMPILE
+ export ARCH=arm

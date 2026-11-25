@@ -1,0 +1,159 @@
+// SPDX-License-Identifier: GPL-2.0
+// Plan A GPU/display spike: the Wi-Fi probe platform plus the LCD controller
+// and the GPU interrupt mapping. Values are measured on this board
+// (docs/plan-a-gpu-display-spike.md): 1280x480 LVDS, timing from the LCDC
+// registers U-Boot programs, LVDS config 0x160fd, framebuffer in stock's
+// display region 0x0b400000 (8 MiB, outside mem=180M Linux RAM).
+// The LCD clock node has no index/div values and no clk-can-change, so the
+// kernel neither writes nor changes the clock U-Boot configured.
+#include "bm168-wifi.dts"
+#include "bm168-peripherals.dtsi"
+#include "bm168-audio.dtsi"
+/ {
+    model = "BM168 Plan A GPU/display spike (RAM)";
+    // The SDK configuration has no ATAGS, so the kernel takes its command
+    // line only from here; U-Boot's stock bootargs cannot reach it.
+    chosen {
+        // mem=180M is stock's Linux RAM (0x00000000-0x0B3FFFFF); the framebuffer
+        // region at 0x0B400000 stays outside it. cma=0 as stock (no CMA): with
+        // the SDK's FORCE_MAX_ZONEORDER=15 any CMA area is rounded up to 64 MiB
+        // (cma=32M reserved 64 MiB and left 104 MB, against stock's 176 MB);
+        // galcore's 8 MiB comes from the buddy allocator as on stock, and the
+        // decoder uses the stock-layout pool above Linux RAM. profile=2:
+        // kernel tick profile in /proc/profile (CONFIG_PROFILING, profsum).
+        bootargs = "console=ttyS0,115200n8 earlyprintk mem=180M cma=0 rdinit=/init clk_ignore_unused panic=0 profile=2";
+    };
+    // PL310 L2 cache (ID 0x410000C9, 8 ways x 16 KiB), as the SDK
+    // ark1668.dtsi. Without this node the kernel never enables it (control
+    // register 0x70000100 read 0 on Plan A, 2026-11-19): every L1 miss went to
+    // DRAM. The ark1668 machine descriptor sets l2c_aux_mask = ~0.
+    // Settings as stock 3.4 runs it (read on stock, 2026-11-19): power control
+    // 0x70000F80 = 0 (4.19 otherwise enables dynamic clock gating and standby
+    // mode; with both on, Plan A hung at random points early in boot), tag and
+    // data latency 0 (1 cycle), instruction prefetch on (aux 0x6E020001,
+    // prefetch control 0x24000000).
+    L2: cache-controller@70000000 {
+        compatible = "arm,pl310-cache";
+        reg = <0x70000000 0x1000>;
+        cache-unified;
+        cache-level = <2>;
+        arm,tag-latency = <1 1 1>;
+        arm,data-latency = <1 1 1>;
+        arm,dynamic-clock-gating = <0>;
+        arm,standby-mode = <0>;
+        prefetch-instr = <1>;
+    };
+};
+&{/cpus/cpu@0} {
+    next-level-cache = <&L2>;
+};
+/ {
+  sregs@e4900000 {
+   clocks {
+    lcdclk: lcdclk {
+        #clock-cells = <0>;
+        compatible = "arkmiro,ark-clk-sys";
+        clocks = <&cpupll>, <&syspll>, <&ddsclk>, <&xtal24mhz>;
+        reg = <0x54>;
+        index-offset = <7>;
+        index-mask = <0xf>;
+        div-offset = <19>;
+        div-mask = <0xf>;
+    };
+    // Decoder clock: CPU PLL / 2, as the SDK ark1668.dtsi and stock's
+    // runtime (register 0x64 = 0x00210016). The bootloader leaves
+    // 0x00040016 (clk240mhz, divider field 0), at which the decoder produces
+    // stream errors on every frame; see docs/plan-a-video-decoder-spike.md.
+    mfcclk: mfcclk {
+        #clock-cells = <0>;
+        compatible = "arkmiro,ark-clk-sys";
+        clocks = <&cpupll>, <&syspll>, <&clk240mhz>, <&xtal24mhz>;
+        reg = <0x64>;
+        index-offset = <16>;
+        index-mask = <0xf>;
+        index-value = <1>;
+        div-offset = <20>;
+        div-mask = <0x7>;
+        div-value = <2>;
+    };
+   };
+  };
+};
+/ {
+    // Launcher sets the screen brightness through
+    // /sys/devices/platform/pwm-backlight/backlight/pwm-backlight/brightness
+    // (stock: max 100, 30 at boot). Node name gives that exact path.
+    pwm-backlight {
+        compatible = "pwm-backlight";
+        pwms = <&pwm0 1 50000>;
+        brightness-levels = <0 100>;
+        num-interpolated-steps = <100>;
+        default-brightness-level = <30>;
+    };
+    ahb {
+        lcdc: lcd@e0500000 {
+            compatible = "arkmicro,ark1668-lcdc";
+            reg = <0xe0500000 0x1000 0x0b400000 0x800000>;
+            interrupt-parent = <&vicl>;
+            interrupts = <9>;
+            clocks = <&lcdclk>;
+            clock-names = "lcdc_clk";
+            display = <&display0>;
+            display0: display@0 {
+                interface-type = "LVDS";
+                lvds-con = <0x160fd>;
+                bits-per-pixel = <32>;
+                lcd-wiring-mode = "BGR";
+                // Colour processing as stock runs it (LCDC dump 2026-11-18):
+                // OSD1_VP_REG1 0x144 = 0x00737373 (Launcher's own setting,
+                // applied on stock through ARKDISP_SET_VDE_CFG, which our
+                // /dev/ark_display lacks); VIDEO_VP_REG_1 0x1d8 = 0x00406268
+                // (arkdata videoContrast 0x68, videoBrightness 0x62,
+                // videoSaturation 0x40). VIDEO2 (CarPlay) already matched.
+                osd1-vp = <0x00737373>;
+                video1-vp = <0x00406268>;
+                display-timings {
+                    native-mode = <&timing0>;
+                    timing0: timing0 {
+                        clock-frequency = <46050000>;
+                        hactive = <1280>;
+                        vactive = <480>;
+                        hfront-porch = <63>;
+                        hback-porch = <62>;
+                        hsync-len = <11>;
+                        vfront-porch = <24>;
+                        vback-porch = <27>;
+                        vsync-len = <11>;
+                        hsync-active = <1>;
+                        vsync-active = <1>;
+                        de-active = <0>;
+                        pixelclk-active = <0>;
+                    };
+                };
+            };
+        };
+        // Hantro decoder (stock hx170dec: 0xe0900000, VIC IRQ 24).
+        pwm0: pwm@e4d00000 {
+            // Stock backlight: channel 1, period 1200 cycles of 24 MHz
+            // (50 us), duty 360 (30 %). U-Boot already muxes the pad.
+            compatible = "arkmicro,ark-pwm";
+            reg = <0xe4d00000 0x100>;
+            #pwm-cells = <2>;
+            clocks = <&xtal24mhz>;
+        };
+        vdec0: vdec@e0900000 {
+            compatible = "on2,ark-vdec";
+            reg = <0xe0900000 0x1000>;
+            interrupt-parent = <&vicl>;
+            interrupts = <24>;
+            clocks = <&mfcclk>;
+            clock-names = "vdec_clk";
+        };
+        gpu: gpu@e0f00000 {
+            compatible = "arkmicro,vivante-hal";
+            reg = <0xe0f00000 0x1000>;
+            interrupt-parent = <&vich>;
+            interrupts = <0>;
+        };
+    };
+};

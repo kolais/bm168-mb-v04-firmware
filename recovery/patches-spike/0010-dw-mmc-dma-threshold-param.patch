@@ -1,0 +1,37 @@
+AUTOTOP: make dw_mmc's DMA threshold (bytes below which a data transfer
+uses PIO) a run-time parameter, default unchanged (16). For the CarPlay CPU
+experiment: the RTL8821CS makes many small CMD53 transfers per packet, and
+each one currently sets up an ark-dma descriptor and adds a DMA interrupt.
+Also counts transfers sent by DMA and by PIO (xfers_dma, xfers_pio).
+
+--- a/drivers/mmc/host/dw_mmc.c	2026-11-18 23:31:32
++++ b/drivers/mmc/host/dw_mmc.c	2026-11-18 23:31:49
+@@ -53,6 +53,15 @@
+ #define DW_MCI_SEND_STATUS	1
+ #define DW_MCI_RECV_STATUS	2
+ #define DW_MCI_DMA_THRESHOLD	16
++/* AUTOTOP: data transfers smaller than this many bytes use PIO instead of
++ * DMA (mainline: 16). Writable at run time for the CarPlay CPU experiment:
++ * /sys/module/dw_mmc/parameters/dma_threshold. */
++static unsigned int dma_threshold = DW_MCI_DMA_THRESHOLD;
++module_param(dma_threshold, uint, 0644);
++MODULE_PARM_DESC(dma_threshold, "bytes below which data transfers use PIO");
++static unsigned int xfers_dma, xfers_pio;
++module_param(xfers_dma, uint, 0444);
++module_param(xfers_pio, uint, 0444);
+ 
+ #define DW_MCI_FREQ_MAX	200000000	/* unit: HZ */
+ #define DW_MCI_FREQ_MIN	100000		/* unit: HZ */
+@@ -908,8 +917,11 @@
+ 	 * non-word-aligned buffers or lengths. Also, we don't bother
+ 	 * with all the DMA setup overhead for short transfers.
+ 	 */
+-	if (data->blocks * data->blksz < DW_MCI_DMA_THRESHOLD)
++	if (data->blocks * data->blksz < READ_ONCE(dma_threshold)) {
++		xfers_pio++;
+ 		return -EINVAL;
++	}
++	xfers_dma++;
+ 
+ 	if (data->blksz & 3)
+ 		return -EINVAL;

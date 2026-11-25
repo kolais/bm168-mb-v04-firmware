@@ -1,0 +1,191 @@
+// SPDX-License-Identifier: GPL-2.0
+// BM168 projection peripherals for the Plan A RAM spike: Bluetooth UART,
+// the MCU link UART,
+// I2C bus 0 (Goodix touch, MFi coprocessor), DMA for the Wi-Fi SDIO host
+// and the pad multiplexing stock
+// applies for them. Values come from the stock kernel and a read-only survey
+// of the running stock system (docs/plan-a-compatibility.md, "Stock
+// peripheral survey"); the pin groups are the SDK's, which reproduce stock's
+// pad values exactly. Only these groups are written; every other pad keeps
+// the bootloader's setting.
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/pinctrl/ark-pinfunc.h>
+
+/ {
+    aliases { hsserial1 = &uart5; gpio2 = &gpio2; serial2 = &uart2; };
+};
+
+&{/sregs@e4900000/clocks} {
+    // ttyHS1 reference clock: xtal 24 MHz, divider field 0, as stock
+    // (register 0x6c bits 17 and 13-16 are 0 on stock; U-Boot leaves
+    // divider 15). Same node as the SDK ark1668.dtsi.
+    uart5clk: uart5clk {
+        #clock-cells = <0>;
+        compatible = "arkmiro,ark-clk-sys";
+        clocks = <&xtal24mhz>, <&syspll>;
+        reg = <0x6c>;
+        index-offset = <17>;
+        index-mask = <0x1>;
+        index-value = <0>;
+        div-offset = <13>;
+        div-mask = <0xf>;
+        div-value = <0>;
+        div-mode = <ARK_CLK_DIVMODE_NOZERO>;
+        enable-reg = <0x48 0x50>;
+        enable-offset = <10 10>;
+    };
+};
+
+&{/ahb} {
+    pinctrl0: pinctrl@e4900000 {
+        compatible = "arkmicro,ark1668-pinctrl";
+        reg = <0xe4900000 0x1000>;
+        // Hogs: MFi coprocessor reset pin 95 and Bluetooth power pin 94 to
+        // their GPIO function (stock 0, U-Boot leaves 1); gpio2 line 31 then
+        // drives the MFi reset high below, gocsdk drives GPIO 94 itself.
+        pinctrl-names = "default";
+        pinctrl-0 = <&pinctrl_mfi_rst &pinctrl_bt_power>;
+
+        uart5 {
+            pinctrl_uart5: uart5-0 {
+                ark,pins = <ARK_PBANK_3 28 ARK_PVAL_1      /* uart5 rx, pin 124 */
+                            ARK_PBANK_3 27 ARK_PVAL_1>;    /* uart5 tx, pin 123 */
+            };
+        };
+        uart2 {
+            // MCU link (ttyS2): stock pads 66/67 = 1 (0x1e0 bits 8-11);
+            // U-Boot leaves 2.
+            pinctrl_uart2: uart2-0 {
+                ark,pins = <ARK_PBANK_2 2 ARK_PVAL_1       /* uart2 rx, pin 66 */
+                            ARK_PBANK_2 3 ARK_PVAL_1>;     /* uart2 tx, pin 67 */
+            };
+        };
+        i2c0 {
+            pinctrl_i2c0: i2c0-0 {
+                ark,pins = <ARK_PBANK_2 6 ARK_PVAL_2       /* i2c0 scl, pin 70 */
+                            ARK_PBANK_2 7 ARK_PVAL_2>;     /* i2c0 sda, pin 71 */
+            };
+        };
+        mfi {
+            pinctrl_mfi_rst: mfi-rst {
+                ark,pins = <ARK_PBANK_2 31 ARK_PVAL_0>;    /* GPIO 95 */
+            };
+        };
+        bt {
+            // Bluetooth module power: gocsdk's bt_power exports GPIO 94
+            // (its default when no config sets one) and toggles it. Stock
+            // pad 94 is GPIO (0); U-Boot leaves 1, which kept the module
+            // unpowered (SPIKE10: verified with a devmem write of the stock
+            // value, after which the module loaded its firmware).
+            pinctrl_bt_power: bt-power {
+                ark,pins = <ARK_PBANK_2 30 ARK_PVAL_0>;    /* GPIO 94 */
+            };
+        };
+    };
+
+    gpio2: gpio@e4600040 {
+        compatible = "arkmicro,ark-gpio";
+        reg = <0xe4600040 0x20>;
+        interrupt-parent = <&vicl>;
+        interrupts = <1>;
+        gpio-controller;
+        #gpio-cells = <2>;
+        // No gpio-ranges: pads are set only by the pinctrl groups above.
+        mfi-reset {
+            // Stock board init: gpio_request(95, "apple_encpy_ic_rst"), high.
+            gpio-hog;
+            gpios = <31 GPIO_ACTIVE_HIGH>;
+            output-high;
+            line-name = "apple_encpy_ic_rst";
+        };
+    };
+
+    uart5: serial@e4800000 {
+        // ttyHS1: Bluetooth module (gocsdk), stock 0xe4800000 IRQ 28.
+        compatible = "arkmicro,ark-hsuart";
+        reg = <0xe4800000 0x4000>;
+        interrupt-parent = <&vicl>;
+        interrupts = <28>;
+        clocks = <&uart5clk>;
+        pinctrl-names = "default";
+        pinctrl-0 = <&pinctrl_uart5>;
+    };
+
+    uart2: serial@e8000000 {
+        // ttyS2: GD32 MCU link (stock 0xe8000000 IRQ 44; Launcher opens it
+        // at 115200 8N1 raw, no flow control). A plain tty, not the SDK's
+        // in-kernel MCU mode.
+        compatible = "arkmicro,ark-uart";
+        reg = <0xe8000000 0x1000>;
+        interrupt-parent = <&vich>;
+        interrupts = <12>;
+        current-speed = <115200>;
+        clocks = <&xtal24mhz>;
+        pinctrl-names = "default";
+        pinctrl-0 = <&pinctrl_uart2>;
+    };
+
+    dwdma0: dma@e0000000 {
+        // Ark DMA controller (stock ark_dw_dmac, IRQ 0), SDK ark1668.dtsi
+        // values. Stock moves SDIO (Wi-Fi) data through it: about 0.2 DMA
+        // and 0.9 SDIO interrupts per packet on stock against 10.5 SDIO
+        // interrupts per packet with 4.19's PIO fallback.
+        compatible = "arkmicro,ark-dma";
+        reg = <0xe0000000 0x1000>;
+        interrupt-parent = <&vicl>;
+        interrupts = <0>;
+        dma-channels = <8>;
+        dma-masters = <2>;
+        chan_allocation_order = <1>;
+        chan_priority = <1>;
+        block_size = <0xfff>;
+        data-width = <4 4>;
+        clocks = <&ahbclk>;
+        clock-names = "hclk";
+        #dma-cells = <3>;
+    };
+
+    i2c0: i2c@e4300000 {
+        // Stock bus 0 ("ArkMicro I2C adapter", IRQ 17): Goodix 0x5d and the
+        // MFi coprocessor 0x11 (carplay: CARPLAY_I2C_ADDR=0x22, 8-bit form),
+        // which userspace reaches through /dev/i2c-0.
+        #address-cells = <1>;
+        #size-cells = <0>;
+        compatible = "snps,designware-i2c";
+        reg = <0xe4300000 0x1000>;
+        interrupt-parent = <&vicl>;
+        interrupts = <17>;
+        clocks = <&pclk>;
+        clock-frequency = <100000>;
+        pinctrl-names = "default";
+        pinctrl-0 = <&pinctrl_i2c0>;
+
+        touchscreen@5d {
+            // Stock Goodix-TS: interrupt GPIO 4 (IRQ 68, falling edge),
+            // reset GPIO 80 (GTP_RST_PORT).
+            compatible = "goodix,gt911";
+            reg = <0x5d>;
+            interrupt-parent = <&gpio0>;
+            interrupts = <4 IRQ_TYPE_EDGE_FALLING>;
+            irq-gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;
+            reset-gpios = <&gpio2 16 GPIO_ACTIVE_HIGH>;
+        };
+    };
+};
+
+&mmc1 {
+    // Wi-Fi SDIO host: DMA request line 9 as the SDK and stock's vendor
+    // fields (docs/wifi-board-glue.md); dw_mmc uses its external-DMA path.
+    dmas = <&dwdma0 9 1 0>;
+    dma-names = "rx-tx";
+    // SPIKE13: in-band SDIO card interrupt instead of ksdioirqd polling.
+    // Stock polls (no MMC_CAP_SDIO_IRQ); with DMA, 4.19 still lost about a
+    // third of received frames with the CPU half idle (SPIKE12).
+    cap-sdio-irq;
+};
+
+&gpio0 {
+    interrupt-controller;
+    #interrupt-cells = <2>;
+};

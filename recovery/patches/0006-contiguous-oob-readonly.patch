@@ -1,0 +1,47 @@
+--- a/drivers/mtd/nand/raw/ark_nand.c
++++ b/drivers/mtd/nand/raw/ark_nand.c
+@@ -441,6 +441,19 @@
+ 	return ret;
+ }
+ 
++static int ark_recovery_read_oob(struct mtd_info *mtd, struct nand_chip *chip,
++	int page)
++{
++	struct ark_nfc *nfc = to_ark_nfc(chip);
++	int ret;
++
++	/* BM168 has contiguous spare bytes, not interleaved syndrome sectors. */
++	nfc->raw_rw = 1;
++	ret = nand_read_oob_std(mtd, chip, page);
++	nfc->raw_rw = 0;
++	return ret;
++}
++
+ static int ark_nand_hw_syndrome_ecc_ctrl_init(struct mtd_info *mtd, struct nand_ecc_ctrl *ecc)
+ {
+ 	struct nand_chip *chip = mtd_to_nand(mtd);
+@@ -460,6 +473,8 @@
+ 	ecc->bytes = BIT_7_ECC_BYTE;
+ 	ecc->strength = 7;
+ 	ecc->read_page_raw = ark_recovery_read_raw;
++	ecc->read_oob = ark_recovery_read_oob;
++	ecc->read_oob_raw = ark_recovery_read_oob;
+ 	val = BCH_CR_SECTOR_MODE | BCH_CR_SECTOR_LENGTH |
+ 	      BCH_BIT_SEL(BCH_7BIT_SEL) | BCH_CR_BCH_ENABLE;
+ 	writel(val, nfc->regs + rBCH_CR);
+@@ -714,6 +729,15 @@
+ 	if (ret)
+ 		return ret;
+ 
++	/* The marker probe assumes Macronix SLC first/second-page byte zero. */
++	if (nand->badblockpos != 0 || nand->badblockbits != 8 ||
++	    !(nand->bbt_options & NAND_BBT_SCAN2NDPAGE) ||
++	    (nand->bbt_options & NAND_BBT_SCANLASTPAGE)) {
++		dev_err(dev, "unexpected bad-block marker policy\n");
++		nand_release(nand);
++		return -EINVAL;
++	}
++	dev_info(dev, "AUTOTOP contiguous OOB: marker byte 0, pages 0/1, no flash BBT\n");
+ 	mtd->flags &= ~MTD_WRITEABLE;
+ 	dev_info(dev, "AUTOTOP NAND read-only: ROM, no BBT scan, command guard active\n");
+ 	ret = mtd_device_register(mtd, NULL, 0);

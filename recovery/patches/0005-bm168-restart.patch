@@ -1,0 +1,116 @@
+--- a/arch/arm/mach-arkmicro/Makefile
++++ b/arch/arm/mach-arkmicro/Makefile
+@@ -11,3 +11,6 @@
+ obj-$(CONFIG_SOC_AMT630H)		+= amt630h.o
+ obj-$(CONFIG_SMP)			+= headsmp.o platsmp.o
+ 
++
++# Recovery-only provider; binds solely to the BM168 opt-in DT node.
++obj-$(CONFIG_SOC_ARK1668) += bm168-restart.o
+--- /dev/null
++++ b/arch/arm/mach-arkmicro/bm168-restart.c
+@@ -0,0 +1,104 @@
++// SPDX-License-Identifier: GPL-2.0
++/* BM168 recovery reset provider. Stock sequence decoded in recovery-restart-review.md. */
++#include <linux/clk.h>
++#include <linux/delay.h>
++#include <linux/io.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/reboot.h>
++#include <linux/slab.h>
++
++struct bm168_restart {
++	void __iomem *base;
++	struct clk *clock;
++	struct notifier_block notifier;
++};
++
++static int bm168_restart_notify(struct notifier_block *nb,
++			       unsigned long action, void *data)
++{
++	struct bm168_restart *reset = container_of(nb, struct bm168_restart, notifier);
++	void __iomem *base = reset->base;
++
++	pr_emerg("BM168 recovery: requesting stock watchdog reset\n");
++	/* Exact plain-ARK1668 stock order; no ARK1668E SoC/GPIO resets. */
++	writel(readl(base) | 0x32, base);
++	writel(128, base + 0x04);
++	writel(37, base + 0x08);
++	writel(0, base + 0x10);
++	writel(1, base + 0x14);
++	writel(readl(base) | 1, base);
++	readl(base); /* Complete posted writes before waiting for reset. */
++	mdelay(1000);
++	pr_emerg("BM168 recovery: watchdog reset did not complete\n");
++	return NOTIFY_DONE;
++}
++
++static int bm168_restart_probe(struct platform_device *pdev)
++{
++	struct bm168_restart *reset;
++	struct resource *res;
++	int ret;
++
++	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++	if (!res || res->start != 0xe4b00000 || resource_size(res) < 0x18)
++		return -EINVAL;
++	reset = devm_kzalloc(&pdev->dev, sizeof(*reset), GFP_KERNEL);
++	if (!reset)
++		return -ENOMEM;
++	reset->base = devm_ioremap_resource(&pdev->dev, res);
++	if (IS_ERR(reset->base))
++		return PTR_ERR(reset->base);
++	reset->clock = devm_clk_get(&pdev->dev, NULL);
++	if (IS_ERR(reset->clock))
++		return PTR_ERR(reset->clock);
++	/* Constants are from stock at the measured 81 MHz peripheral clock. */
++	if (clk_get_rate(reset->clock) != 81000000)
++		return -EINVAL;
++	ret = clk_prepare_enable(reset->clock);
++	if (ret)
++		return ret;
++	/* Do not reconfigure an inherited active watchdog or arm one at probe. */
++	if (readl(reset->base) & 1) {
++		dev_err(&pdev->dev, "inherited watchdog active; reset provider rejected\n");
++		ret = -EBUSY;
++		goto disable_clock;
++	}
++	reset->notifier.notifier_call = bm168_restart_notify;
++	reset->notifier.priority = 128;
++	ret = register_restart_handler(&reset->notifier);
++	if (ret)
++		goto disable_clock;
++	platform_set_drvdata(pdev, reset);
++	dev_info(&pdev->dev, "BM168 restart handler ready; watchdog remains unarmed\n");
++	return 0;
++
++disable_clock:
++	clk_disable_unprepare(reset->clock);
++	return ret;
++}
++
++static int bm168_restart_remove(struct platform_device *pdev)
++{
++	struct bm168_restart *reset = platform_get_drvdata(pdev);
++
++	unregister_restart_handler(&reset->notifier);
++	clk_disable_unprepare(reset->clock);
++	return 0;
++}
++
++static const struct of_device_id bm168_restart_match[] = {
++	{ .compatible = "autotop,bm168-restart" },
++	{ }
++};
++
++static struct platform_driver bm168_restart_driver = {
++	.probe = bm168_restart_probe,
++	.remove = bm168_restart_remove,
++	.driver = {
++		.name = "bm168-restart",
++		.of_match_table = bm168_restart_match,
++		.suppress_bind_attrs = true,
++	},
++};
++builtin_platform_driver(bm168_restart_driver);

@@ -1,0 +1,190 @@
+diff -ruN a/Makefile b/Makefile
+--- a/Makefile	2026-11-17 20:16:59
++++ b/Makefile	2026-11-17 20:17:14
+@@ -54,7 +54,7 @@
+ ########################## Features ###########################
+ CONFIG_AP_MODE = y
+ CONFIG_P2P = y
+-CONFIG_MP_INCLUDED = y
++CONFIG_MP_INCLUDED = n
+ CONFIG_POWER_SAVING = y
+ CONFIG_IPS_MODE = default
+ CONFIG_LPS_MODE = default
+@@ -62,10 +62,10 @@
+ CONFIG_HW_PWRP_DETECTION = n
+ CONFIG_BT_COEXIST = y
+ CONFIG_WAPI_SUPPORT = n
+-CONFIG_EFUSE_CONFIG_FILE = y
++CONFIG_EFUSE_CONFIG_FILE = n
+ CONFIG_EXT_CLK = n
+ CONFIG_TRAFFIC_PROTECT = n
+-CONFIG_LOAD_PHY_PARA_FROM_FILE = y
++CONFIG_LOAD_PHY_PARA_FROM_FILE = n
+ CONFIG_TXPWR_BY_RATE = y
+ CONFIG_TXPWR_BY_RATE_EN = y
+ CONFIG_TXPWR_LIMIT = y
+@@ -94,7 +94,7 @@
+ 
+ ########################## Android ###########################
+ # CONFIG_RTW_ANDROID - 0: no Android, 4/5/6/7/8/9/10/11 : Android version
+-CONFIG_RTW_ANDROID = 11
++CONFIG_RTW_ANDROID = 0
+ 
+ ifeq ($(shell test $(CONFIG_RTW_ANDROID) -gt 0; echo $$?), 0)
+ EXTRA_CFLAGS += -DCONFIG_RTW_ANDROID=$(CONFIG_RTW_ANDROID)
+@@ -110,14 +110,14 @@
+ CONFIG_PROC_DEBUG = y
+ 
+ ######################## Wake On Lan ##########################
+-CONFIG_WOWLAN = y
++CONFIG_WOWLAN = n
+ #bit3: ARP enable, bit2: deauth, bit1: unicast, bit0: magic pkt.
+ CONFIG_WAKEUP_TYPE = 0xf
+ CONFIG_WOW_LPS_MODE = default
+ #bit0: disBBRF off, #bit1: Wireless remote controller (WRC)
+ CONFIG_SUSPEND_TYPE = 0
+ CONFIG_WOW_STA_MIX = n
+-CONFIG_GPIO_WAKEUP = y
++CONFIG_GPIO_WAKEUP = n
+ # Please contact with RTK support team first. After getting the agreement from RTK support team, 
+ # you are just able to modify the CONFIG_WAKEUP_GPIO_IDX with customized requirement.
+ CONFIG_WAKEUP_GPIO_IDX = default
+@@ -162,7 +162,8 @@
+ CONFIG_PLATFORM_ARM_TCC8930_JB42 = n
+ CONFIG_PLATFORM_ARM_RK2818 = n
+ CONFIG_PLATFORM_ARM_RK3066 = n
+-CONFIG_PLATFORM_ARM_RK3188 = y
++CONFIG_PLATFORM_ARM_RK3188 = n
++CONFIG_PLATFORM_ARK_BM168 = y
+ CONFIG_PLATFORM_ARM_URBETTER = n
+ CONFIG_PLATFORM_ARM_TI_PANDA = n
+ CONFIG_PLATFORM_MIPS_JZ4760 = n
+@@ -1695,6 +1696,14 @@
+ CROSS_COMPILE := /usr/src/release_fae_version/toolchain/arm-eabi-4.4.0/bin/arm-eabi-
+ KSRC := /usr/src/release_fae_version/kernel25_A7_281x
+ MODULE_NAME := wlan
++endif
++
++ifeq ($(CONFIG_PLATFORM_ARK_BM168), y)
++# AUTOTOP BM168 (ARK1668, SDK Linux 4.19): cfg80211 only, AP + station
++# concurrency like stock (wlan0/wlan1). ARCH, CROSS_COMPILE and KSRC come
++# from the build command line.
++EXTRA_CFLAGS += -DCONFIG_LITTLE_ENDIAN -DCONFIG_IOCTL_CFG80211 -DRTW_USE_CFG80211_STA_EVENT
++EXTRA_CFLAGS += -DCONFIG_CONCURRENT_MODE
+ endif
+ 
+ ifeq ($(CONFIG_PLATFORM_ARM_RK3188), y)
+diff -ruN a/core/rtw_ieee80211.c b/core/rtw_ieee80211.c
+--- a/core/rtw_ieee80211.c	2026-11-17 20:16:59
++++ b/core/rtw_ieee80211.c	2026-11-17 20:17:14
+@@ -19,7 +19,6 @@
+ 	#include <linux/fs.h>
+ #endif
+ #include <drv_types.h>
+-#include <linux/rfkill-wlan.h>
+ 
+ u8 RTW_WPA_OUI_TYPE[] = { 0x00, 0x50, 0xf2, 1 };
+ u16 RTW_WPA_VERSION = 1;
+@@ -1775,10 +1774,6 @@
+ 		_rtw_memcpy(mac, hw_mac_addr, ETH_ALEN);
+ 	}
+ 
+-	if (!rockchip_wifi_mac_addr(mac)) {
+-		printk("get mac address from flash=[%02x:%02x:%02x:%02x:%02x:%02x]\n", mac[0], mac[1],
+-				mac[2], mac[3], mac[4], mac[5]);
+-	}
+ 
+ err_chk:
+ 	if (rtw_check_invalid_mac_address(mac, _TRUE) == _TRUE) {
+diff -ruN a/os_dep/linux/sdio_intf.c b/os_dep/linux/sdio_intf.c
+--- a/os_dep/linux/sdio_intf.c	2026-11-17 20:16:59
++++ b/os_dep/linux/sdio_intf.c	2026-11-17 20:17:14
+@@ -1410,59 +1410,19 @@
+ #endif /* CONFIG_PLATFORM_INTEL_BYT */
+ 
+ #include "rtw_version.h"
+-#include <linux/rfkill-wlan.h>
+-extern int get_wifi_chip_type(void);
+-extern int rockchip_wifi_power(int on);
+-extern int rockchip_wifi_set_carddetect(int val);
+ 
+-int rockchip_wifi_init_module_rtkwifi(void)
++/* BM168: no rfkill/power helpers; the SDIO card is present at host probe. */
++static int __init bm168_rtw_init(void)
+ {
+-//#ifdef CONFIG_WIFI_LOAD_DRIVER_WHEN_KERNEL_BOOTUP
+-//    int type = get_wifi_chip_type();
+-//    if (type < WIFI_AP6XXX_SERIES || type == WIFI_ESP8089) return 0;
+-//#endif
+-    printk("\n");
+-    printk("=======================================================\n");
+-    printk("==== Launching Wi-Fi driver! (Powered by Rockchip) ====\n");
+-    printk("=======================================================\n");
+-    printk("Realtek 8821CS SDIO WiFi driver (Powered by Rockchip,Ver %s) init.\n", DRIVERVERSION);
+-
+-    rockchip_wifi_power(1);
+-    rockchip_wifi_set_carddetect(1);    
+-    
+-    return rtw_drv_entry();
+-
++	printk(KERN_INFO "Realtek 8821CS SDIO WiFi driver %s (BM168 build)\n", DRIVERVERSION);
++	return rtw_drv_entry();
+ }
+ 
+-void rockchip_wifi_exit_module_rtkwifi(void)
++static void __exit bm168_rtw_exit(void)
+ {
+-//#ifdef CONFIG_WIFI_LOAD_DRIVER_WHEN_KERNEL_BOOTUP
+-//    int type = get_wifi_chip_type();
+-//    if (type < WIFI_AP6XXX_SERIES || type == WIFI_ESP8089) return;
+-//#endif
+-    printk("\n");
+-    printk("=======================================================\n");
+-    printk("==== Dislaunching Wi-Fi driver! (Powered by Rockchip) ====\n");
+-    printk("=======================================================\n");
+-    printk("Realtek 8821CS SDIO WiFi driver (Powered by Rockchip,Ver %s) init.\n", DRIVERVERSION);
+-
+-    rtw_drv_halt();
+-    
+-    rockchip_wifi_set_carddetect(0);
+-    rockchip_wifi_power(0);
+-
++	rtw_drv_halt();
+ }
+ 
+-#ifdef CONFIG_WIFI_BUILD_MODULE
+-module_init(rockchip_wifi_init_module_rtkwifi);
+-module_exit(rockchip_wifi_exit_module_rtkwifi);
+-#else
+-#ifdef CONFIG_WIFI_LOAD_DRIVER_WHEN_KERNEL_BOOTUP
+-late_initcall(rockchip_wifi_init_module_rtkwifi);
+-module_exit(rockchip_wifi_exit_module_rtkwifi);
+-#else
+-EXPORT_SYMBOL(rockchip_wifi_init_module_rtkwifi);
+-EXPORT_SYMBOL(rockchip_wifi_exit_module_rtkwifi);
+-#endif
+-#endif
++module_init(bm168_rtw_init);
++module_exit(bm168_rtw_exit);
+ 
+diff -ruN a/platform/platform_ops.c b/platform/platform_ops.c
+--- a/platform/platform_ops.c	2026-11-17 20:16:59
++++ b/platform/platform_ops.c	2026-11-17 20:17:14
+@@ -19,15 +19,10 @@
+  *	0:	power on successfully
+  *	others: power on failed
+  */
+-#include <linux/rfkill-wlan.h>
+-extern unsigned int oob_irq;
++/* BM168: the chip is powered by hardware; stock never controls it. */
+ int platform_wifi_power_on(void)
+ {
+-	int ret = 0;
+-
+-	oob_irq = rockchip_wifi_get_oob_irq();
+-
+-	return ret;
++	return 0;
+ }
+ 
+ void platform_wifi_power_off(void)

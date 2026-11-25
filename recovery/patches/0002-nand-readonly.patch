@@ -1,0 +1,327 @@
+--- a/drivers/mtd/nand/raw/ark_nand.c
++++ b/drivers/mtd/nand/raw/ark_nand.c
+@@ -145,21 +145,8 @@
+         break;
+ 
+ 	case NAND_ECC_WRITE:
+-        writel(readl(nfc->regs + rBCH_CR) | BCH_CR_SECTOR_MODE,
+-               nfc->regs + rBCH_CR);
+-        writel(readl(nfc->regs + rBCH_CR) | BCH_CR_ENCODER_RESET,
+-               nfc->regs + rBCH_CR);
+-        writel(readl(nfc->regs + rBCH_CR) & ~BCH_CR_ENCODER_RESET,
+-               nfc->regs + rBCH_CR);
+-        writel(readl(nfc->regs + rBCH_CR) | (BCH_CR_SOFT_ECC_ENABLE|BCH_CR_BCH_ENABLE),
+-               nfc->regs + rBCH_CR);
+-#ifndef USE_DATA_INTERFACE
+-		//spin_lock(&nfc->lock);
+-		//nfc->bch_int_status = 0;
+-		//spin_unlock(&nfc->lock);
+-		writel(1, nfc->regs + rNAND_WRBLK_START);
+-#endif
+-        break;
++		pr_err_ratelimited("AUTOTOP read-only NAND: ECC write blocked\n");
++		return;
+ 
+     case NAND_ECC_READSYN:
+ #ifndef USE_DATA_INTERFACE
+@@ -333,6 +320,7 @@
+ 	uint8_t *p = buf;
+ 	uint8_t *oob = chip->oob_poi;
+ 	int oob_pos = 0, pos = 0;
++	int max_bitflips = 0;
+ 
+ 	//printk("ark_nand_read_page_syndrome\n");
+ 	chip->cmdfunc(mtd, NAND_CMD_READ0, 0x00, page);
+@@ -363,6 +351,15 @@
+ 		oob_pos += eccbytes;
+ 		chip->read_buf(mtd, oob, eccbytes);
+ 		stat = chip->ecc.correct(mtd, p, oob, NULL);
++		if (stat == -EBADMSG)
++			stat = nand_check_erased_ecc_chunk(p, eccsize, oob,
++				eccbytes, NULL, 0, chip->ecc.strength);
++		if (stat < 0)
++			mtd->ecc_stats.failed++;
++		else {
++			mtd->ecc_stats.corrected += stat;
++			max_bitflips = max(max_bitflips, stat);
++		}
+ 		oob += eccbytes;
+ 
+ 		if(eccsteps > 1){
+@@ -389,7 +386,7 @@
+ 		chip->read_buf(mtd, chip->oob_poi, mtd->oobsize);
+ 	}
+ 
+-	return 0;
++	return max_bitflips;
+ }
+ 
+ /**
+@@ -402,39 +399,46 @@
+  * we need a special oob layout and handling.
+  */
+ static int ark_nand_write_page_syndrome(struct mtd_info *mtd,
+-						struct nand_chip *chip, const uint8_t *buf,
+-						int oob_required, int page)
+-{
+-	struct mtd_oob_region oobregion;
+-	int i, eccsize = chip->ecc.size;
+-	int eccbytes = chip->ecc.bytes;
+-	int eccsteps = chip->ecc.steps;
+-	const uint8_t *p = buf;
+-	uint8_t *oob = chip->oob_poi;
+-	int status;
+-
+-	//printk("ark_nand_write_page_syndrome\n");
+-	chip->cmdfunc(mtd, NAND_CMD_SEQIN, 0x00, page);
+-
+-	mtd_ooblayout_ecc(mtd, 0, &oobregion);
+-	oob += oobregion.offset;
+-
+-	for (i = 0; eccsteps; eccsteps--, i += eccbytes, p += eccsize) {
+-		chip->ecc.hwctl(mtd, NAND_ECC_WRITE);
+-		chip->write_buf(mtd, p, eccsize);
+-		chip->ecc.calculate(mtd, p, oob);
+-		oob += eccbytes;
+-	}
+-
+-	chip->write_buf(mtd, chip->oob_poi, mtd->oobsize);
+-
+-	chip->cmdfunc(mtd, NAND_CMD_PAGEPROG, -1, -1);
+-
+-	status = chip->waitfunc(mtd, chip);
+-	if (status & NAND_STATUS_FAIL)
+-		return -EIO;
+-
++	struct nand_chip *chip, const uint8_t *buf, int oob_required, int page)
++{
++	return -EROFS;
++}
++
++static int ark_recovery_oob_ecc(struct mtd_info *mtd, int section,
++	struct mtd_oob_region *region)
++{
++	if (section)
++		return -ERANGE;
++	region->offset = 3;
++	region->length = 26;
+ 	return 0;
++}
++
++static int ark_recovery_oob_free(struct mtd_info *mtd, int section,
++	struct mtd_oob_region *region)
++{
++	if (section)
++		return -ERANGE;
++	region->offset = 29;
++	region->length = 35;
++	return 0;
++}
++
++static const struct mtd_ooblayout_ops ark_recovery_oob = {
++	.ecc = ark_recovery_oob_ecc,
++	.free = ark_recovery_oob_free,
++};
++
++static int ark_recovery_read_raw(struct mtd_info *mtd, struct nand_chip *chip,
++	uint8_t *buf, int oob_required, int page)
++{
++	struct ark_nfc *nfc = to_ark_nfc(chip);
++	int ret;
++
++	nfc->raw_rw = 1;
++	ret = nand_read_page_raw(mtd, chip, buf, oob_required, page);
++	nfc->raw_rw = 0;
++	return ret;
+ }
+ 
+ static int ark_nand_hw_syndrome_ecc_ctrl_init(struct mtd_info *mtd, struct nand_ecc_ctrl *ecc)
+@@ -450,19 +454,16 @@
+ 	ecc->write_page = ark_nand_write_page_syndrome;
+ 	ecc->size = 1024;
+ 
+-	if (mtd->oobsize == 64) {
+-		ecc->bytes = BIT_13_ECC_BYTE;
+-		ecc->strength = 13;
+-		val = BCH_CR_SECTOR_MODE | BCH_CR_SECTOR_LENGTH | BCH_BIT_SEL(BCH_13BIT_SEL) | BCH_CR_BCH_ENABLE;
+-		writel(val, nfc->regs + rBCH_CR);
+-	} else if(mtd->oobsize >= 128) {
+-		ecc->bytes = BIT_24_ECC_BYTE;
+-		ecc->strength = 24;
+-		val = BCH_CR_SECTOR_MODE | BCH_CR_SECTOR_LENGTH | BCH_BIT_SEL(BCH_24BIT_SEL) | BCH_CR_BCH_ENABLE;
+-		writel(val, nfc->regs + rBCH_CR);
+-	}
+-
+-	mtd_set_ooblayout(mtd, &nand_ooblayout_lp_ops);
++	if (mtd->writesize != 2048 || mtd->oobsize != 64 ||
++	    mtd->size != 128 * 1024 * 1024)
++		return -ENODEV;
++	ecc->bytes = BIT_7_ECC_BYTE;
++	ecc->strength = 7;
++	ecc->read_page_raw = ark_recovery_read_raw;
++	val = BCH_CR_SECTOR_MODE | BCH_CR_SECTOR_LENGTH |
++	      BCH_BIT_SEL(BCH_7BIT_SEL) | BCH_CR_BCH_ENABLE;
++	writel(val, nfc->regs + rBCH_CR);
++	mtd_set_ooblayout(mtd, &ark_recovery_oob);
+ 
+ 	return 0;
+ }
+@@ -549,8 +550,26 @@
+ 		;	/* TODO: Chip Enable de-activate */
+ 	}
+ 
+-	if (cmd != NAND_CMD_NONE){
+-		//printk("cmd: 0x%x\n",cmd);
++	if (cmd != NAND_CMD_NONE) {
++		if (ctrl & NAND_CLE) {
++			switch (cmd) {
++			case NAND_CMD_READ0:
++			case NAND_CMD_READ1:
++			case NAND_CMD_READOOB:
++			case NAND_CMD_READSTART:
++			case NAND_CMD_RNDOUT:
++			case NAND_CMD_RNDOUTSTART:
++			case NAND_CMD_READID:
++			case NAND_CMD_STATUS:
++			case NAND_CMD_PARAM:
++			case NAND_CMD_GET_FEATURES:
++			case NAND_CMD_RESET:
++				break;
++			default:
++				dev_err(nfc->dev, "read-only recovery blocked NAND command 0x%x\n", cmd);
++				return;
++			}
++		}
+ 		writeb(cmd, chip->IO_ADDR_W);
+ 	}
+ 
+@@ -598,7 +617,7 @@
+ 	}
+ 
+ #ifndef USE_DATA_INTERFACE
+-	if (len >= chip->ecc.size && !nfc->raw_rw)
++	if (chip->ecc.size && len >= chip->ecc.size && !nfc->raw_rw)
+ 		read_addr = rNAND_RX_FIFO;
+ #endif
+ 
+@@ -658,93 +677,7 @@
+ 
+ static void ark_nfc_write_buf(struct mtd_info *mtd, const uint8_t *buf, int len)
+ {
+-	struct nand_chip *chip = mtd_to_nand(mtd);
+-	struct ark_nfc *nfc = to_ark_nfc(chip);
+-
+-	int i;
+-	unsigned int* tmp_buf32;
+-	uint8_t* tmp_buf8;
+-	unsigned int unaligned_flag = 0;
+-	unsigned int excess_len;
+-	unsigned int addr_aligned;
+-	unsigned int write_addr = rNAND_DATA;
+-
+-	union{
+-		unsigned int word;
+-		unsigned char byte[4];
+-	} tmp;
+-
+-	//printk("ark_nand_write_buf\n");
+-
+-	tmp.word = 0xFFFFFFFF;
+-
+-	addr_aligned = (unsigned int)buf % 4;
+-	if(addr_aligned){ // Address not aligned to 32 bit word
+-		unaligned_flag |= ARK_NAND_ADDR_UNALIGNED;
+-	}
+-
+-	excess_len = len % 0x4;
+-	if(excess_len){ // length not aligned to 32 bit word
+-		unaligned_flag |= ARK_NAND_LEN_UNALIGNED;
+-	}
+-
+-#ifndef USE_DATA_INTERFACE
+-	if (len >= chip->ecc.size && !nfc->raw_rw)
+-		write_addr = rNAND_TX_FIFO;
+-#endif
+-
+-
+-	switch(unaligned_flag){
+-	case 0:
+-        tmp_buf32 = (unsigned int*)buf;
+-        for (i = 0; i < len >> 2; i++){
+-        	writel(*tmp_buf32++, nfc->regs + write_addr);
+-        }
+-        break;
+-
+-    case ARK_NAND_ADDR_UNALIGNED:
+-        tmp_buf8 = (uint8_t*)buf;
+-        for (i = 0; i < len >> 2; i++){
+-	        tmp.byte[0] = *tmp_buf8++;
+-	        tmp.byte[1] = *tmp_buf8++;
+-	        tmp.byte[2] = *tmp_buf8++;
+-	        tmp.byte[3] = *tmp_buf8++;
+-	        writel(tmp.word, nfc->regs + write_addr);
+-        }
+-        break;
+-
+-    case ARK_NAND_LEN_UNALIGNED:
+-        tmp_buf32 = (unsigned int*)buf;
+-        for (i = 0; i < len >> 2; i++){
+-        	writel(*tmp_buf32++, nfc->regs + write_addr);
+-        }
+-        /* write the excess byte */
+-        tmp_buf8 = (uint8_t*)tmp_buf32;
+-        tmp.word = 0xFFFFFFFF;
+-        for(i = 0; i < excess_len; i++){
+-        	*tmp_buf8++ = tmp.byte[i];
+-        }
+-        writel(tmp.word, nfc->regs + write_addr);
+-        break;
+-
+-    case ARK_NAND_ADDR_UNALIGNED | ARK_NAND_LEN_UNALIGNED:
+-        tmp_buf8 = (uint8_t*)buf;
+-        for (i = 0; i < len >> 2; i++){
+-	        tmp.byte[0] = *tmp_buf8++;
+-	        tmp.byte[1] = *tmp_buf8++;
+-	        tmp.byte[2] = *tmp_buf8++;
+-	        tmp.byte[3] = *tmp_buf8++;
+-	        writel(tmp.word, nfc->regs + write_addr);
+-        }
+-        tmp.word = 0xFFFFFFFF;
+-        for(i = 0; i < excess_len; i++){
+-        	*tmp_buf8++ = tmp.byte[i];
+-        }
+-        writel(tmp.word, nfc->regs + write_addr);
+-        break;
+-    }
+-
+-	return;
++	pr_err_ratelimited("AUTOTOP read-only NAND: data write blocked\n");
+ }
+ 
+ static int ark_nand_chip_init(struct device *dev, struct ark_nfc *nfc)
+@@ -756,6 +689,7 @@
+ 	nand = &nfc->nand;
+ 
+ 	nand->chip_delay = 100;
++	nand->options |= NAND_ROM | NAND_SKIP_BBTSCAN;
+ 	nand->controller = &nfc->controller;
+ 	/*
+ 	 * Set the ECC mode to the default value in case nothing is specified
+@@ -780,6 +714,8 @@
+ 	if (ret)
+ 		return ret;
+ 
++	mtd->flags &= ~MTD_WRITEABLE;
++	dev_info(dev, "AUTOTOP NAND read-only: ROM, no BBT scan, command guard active\n");
+ 	ret = mtd_device_register(mtd, NULL, 0);
+ 	if (ret) {
+ 		dev_err(dev, "failed to register mtd device: %d\n", ret);
+@@ -802,7 +738,7 @@
+ 	int ret;
+ 
+ 	if (nand->bbt_options & NAND_BBT_USE_FLASH)
+-		nand->bbt_options |= NAND_BBT_NO_OOB;
++		return -EINVAL; /* No flash BBT, including its automatic creation. */
+ 
+ 	nand->options |= NAND_NO_SUBPAGE_WRITE;
+ 

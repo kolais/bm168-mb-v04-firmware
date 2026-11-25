@@ -1,0 +1,144 @@
+#!/bin/sh
+# The rescue installer (docs/launcher-design.md, Updates): the unit's whole
+# software, kernel and root filesystem, written from one file on a stick in
+# the CARPLAY socket. It is for a unit whose own Linux does not start, and
+# for the rare change to the system that an app update cannot make.
+#
+# U-Boot starts this kernel from the stick (BOOT.BIN). The software is the
+# container RESCUE.IMG (tools/rescue_image.py), found
+#   - in RAM at 0x04000000, where U-Boot loaded it before starting us (Linux
+#     here is given 64 MiB, so it lies untouched above); or
+#   - as a file on a stick this Linux can read.
+# Then: check the container against its own hashes and the flash against
+# the container (nand-restore plan: nothing is written); if the flash
+# already holds it, say so and stop; else arm the kernel's write window,
+# write, verify (nand-restore execute) and say how it ended. The panel shows
+# every step; the console says the same, with AUTOTOP_RESCUE_ markers.
+#
+# A container made with --plan-only ("mode plan" in its header) stops after
+# the check: the first boot of a new stick at the bench writes nothing.
+#
+# RESCUE_TEST (recovery/plan-a/test-init-rescue.sh) runs the same steps on a
+# build machine: the tools and paths come from the environment, nothing is
+# mounted, and where the unit would wait at a shell the script ends.
+B=${B:-/bin/busybox}
+U=${U:-/usr/bin/rescue-ui}
+N=${N:-/usr/bin/nand-restore}
+W=${W:-/sys/bus/platform/devices/ec000000.nand/autotop_writer}
+MTD=${MTD:-/proc/mtd}
+T=${T:-/tmp}
+RAM=0x04000000
+if test -z "${RESCUE_TEST:-}"; then
+    export PATH=/bin:/usr/bin
+    export HOME=/root
+    export PS1='rescue # '
+    $B mount -t proc proc /proc
+    $B mount -t sysfs sysfs /sys
+    $B mount -t devtmpfs devtmpfs /dev
+    exec </dev/console >/dev/console 2>&1
+    $B mount -t tmpfs tmpfs /tmp
+fi
+echo 'Rescue installer: writes the kernel and rootfs partitions from RESCUE.IMG, nothing else.'
+
+screen() { $U show "$@" > /dev/null 2>&1; }
+shell() {
+    test -n "${RESCUE_TEST:-}" && exit 0
+    while :; do
+        /bin/sh -i
+        echo 'Shell exited; starting another shell.'
+    done
+}
+fail() {
+    echo "AUTOTOP_RESCUE_FAILED: $1"
+    screen -1 'Rescue failed' "$(echo "$1" | $B cut -c1-38)" 'Nothing more is written.' \
+        'Switch the ignition off and on to try again.'
+    shell
+}
+# The reason a nand-restore run stopped (the console has it whole, the screen one line of it).
+why() { $B sed -n 's/^STOP \(.*\)$/\1/p' "$1" | $B head -n 1; }
+field() { $B sed -n "s/^$1 \(.*\)\$/\1/p" $T/head | $B head -n 1; }
+
+$U picture || echo 'rescue: the MCU did not take the picture request'
+screen -1 'Looking for the software'
+
+# A stick this Linux can read (either socket, if its controller will be a
+# host here), else what U-Boot left in RAM.
+for mode in /sys/bus/platform/devices/musb-hdrc.*/mode; do
+    test -z "${RESCUE_TEST:-}" && test -w "$mode" && echo host > "$mode" 2> /dev/null
+done
+src=${RESCUE_SRC:-}
+base=0
+count=0
+while test -z "${RESCUE_TEST:-}" && test -z "$src" && test "$count" -lt 8; do
+    for dev in /dev/sd?1; do
+        test -b "$dev" || continue
+        $B mount -t vfat -o ro,nosuid,nodev,noexec "$dev" /mnt/usb 2> /dev/null || continue
+        if test -f /mnt/usb/RESCUE.IMG; then
+            src=/mnt/usb/RESCUE.IMG
+            base=0
+            break
+        fi
+        $B umount /mnt/usb
+    done
+    test -n "$src" || $B sleep 1
+    count=$((count + 1))
+done
+if test -z "$src"; then
+    src=/dev/mem
+    base=$((RAM))
+fi
+RESCUE_UI_MEM=$src $U mem $base 4096 > $T/head 2> /dev/null
+if test "$($B head -n 1 $T/head 2> /dev/null)" != 'AUTOTOP-RESCUE 1'; then
+    fail 'No software on the stick'
+fi
+echo "rescue: container from $src"
+set -- $(field manifest)
+mo=$1 ml=$2
+set -- $(field image)
+io=$1 il=$2
+set -- $(field window)
+ws=$1 wl=$2
+mode=$(field mode)
+case "$mo$ml$io$il" in '' | *[!0-9]*) fail 'The container is not complete' ;; esac
+RESCUE_UI_MEM=$src $U mem $((base + mo)) $ml > $T/rescue.man 2> /dev/null || fail 'The container cannot be read'
+
+part=$($B sed -n 's/^mtd\([0-9]*\):.*"autotop-write-window"$/\1/p' $MTD)
+test -n "$part" && test -r $W || fail 'This kernel cannot write'
+echo "rescue: writer $($B cat $W)"
+
+screen -1 'Checking the software' 'About a minute. Nothing is written yet.'
+$N plan /dev/mtd$part "$src@$((base + io))" $T/rescue.man > $T/plan.txt 2>&1 || fail "$(why $T/plan.txt)"
+total=$($B grep -c '^PLAN block' $T/plan.txt)
+same=$($B grep -c 'same=1' $T/plan.txt)
+echo "rescue: plan ok, $total blocks, $same already the same"
+test "$total" -gt 0 || fail 'The check gave nothing'
+if test "$same" = "$total"; then
+    echo AUTOTOP_RESCUE_SAME
+    screen 100 'This software is already installed' 'Remove the stick, then switch' 'the ignition off and on.'
+    shell
+fi
+if test "$mode" = plan; then
+    echo "AUTOTOP_RESCUE_PLAN_ONLY blocks=$total same=$same"
+    screen -1 'Check only: nothing was written' "$((total - same)) of $total blocks would change."
+    shell
+fi
+
+echo "arm $ws $wl" > $W || fail 'The write window did not arm'
+(
+    $N execute /dev/mtd$part "$src@$((base + io))" $T/rescue.man > $T/exec.txt 2>&1
+    echo "rc=$?" >> $T/exec.txt
+) &
+until $B grep -q '^rc=' $T/exec.txt 2> /dev/null; do
+    written=$($B grep -c '^VERIFIED' $T/exec.txt 2> /dev/null)
+    screen $((${written:-0} * 100 / total)) "Writing the software: $((${written:-0} * 100 / total))%" \
+        'Keep the ignition on.' 'Do not remove the stick.'
+    $B sleep ${RESCUE_PACE:-2}
+done
+echo "rescue: writer $($B cat $W)"
+if $B grep -q '^RESULT PASS' $T/exec.txt && $B grep -q '^rc=0$' $T/exec.txt; then
+    echo "AUTOTOP_RESCUE_DONE $($B grep '^RESULT' $T/exec.txt | $B head -n 1)"
+    screen 100 'Done' 'Remove the stick, then switch' 'the ignition off and on.'
+else
+    fail "$(why $T/exec.txt)"
+fi
+shell

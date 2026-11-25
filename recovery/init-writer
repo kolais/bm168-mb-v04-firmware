@@ -1,0 +1,42 @@
+#!/bin/sh
+export PATH=/bin:/usr/bin
+export HOME=/root
+export PS1='ram-writer # '
+export OPENSSL_CONF=/dev/null
+/bin/busybox mount -t proc proc /proc
+/bin/busybox mount -t sysfs sysfs /sys
+/bin/busybox mount -t debugfs -o ro,nosuid,nodev,noexec debugfs /sys/kernel/debug
+/bin/busybox mount -t devtmpfs devtmpfs /dev
+exec </dev/console >/dev/console 2>&1
+echo 'Bounded writer recovery: NAND writes only inside the DT window, only when armed.'
+echo 'NAND filesystems are not attached or mounted; S-Loader ECC is unvalidated.'
+# Trigger only the U DISK child after core probe, matching stock startup order.
+mode=/sys/bus/platform/devices/musb-hdrc.1/mode
+if test -w "$mode"; then
+    echo host > "$mode" || echo 'U DISK host startup failed'
+else
+    echo 'U DISK mode control missing; USB bring-up is unproven'
+fi
+count=0
+while ! test -b /dev/sda1 && test "$count" -lt 20; do
+    /bin/busybox sleep 1
+    count=$((count + 1))
+done
+if test -b /dev/sda1; then
+    /bin/busybox blockdev --setro /dev/sda &&
+        /bin/busybox blockdev --setro /dev/sda1 &&
+        /bin/busybox mount -t vfat -o ro,nosuid,nodev,noexec /dev/sda1 /mnt/usb
+fi
+writer=/sys/bus/platform/devices/ec000000.nand/autotop_writer
+if test -r "$writer"; then
+    echo "Writer state: $(/bin/busybox cat "$writer")"
+else
+    echo 'Writer control missing; no NAND writes are possible'
+fi
+echo AUTOTOP_WRITER_RECOVERY_READY
+/bin/busybox uname -a
+/bin/busybox cat /proc/mtd /proc/mounts
+while :; do
+    /bin/sh -i
+    echo 'Shell exited; starting another shell.'
+done

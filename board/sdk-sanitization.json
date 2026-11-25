@@ -1,0 +1,41 @@
+{
+  "upstream_url": "https://github.com/yogihybo/linux-arkmicro.git",
+  "upstream_commit": "ffb07cd15d3abb1f8b4291500f8e8764c5309952",
+  "archive_url": "https://codeload.github.com/yogihybo/linux-arkmicro/tar.gz/ffb07cd15d3abb1f8b4291500f8e8764c5309952",
+  "archive_sha256": "2686640267762cdcc7ddc6d2732ea32fbc8568381a65a958ac346d406a6f02fd",
+  "wifi_templates": [
+    "buildroot-external/board/arkmicro/ark1668_dongle_sim/rootfs_overlay/etc/hostapd/hostapd.conf",
+    "buildroot-external/board/arkmicro/ark1668_tyw_zksw/rootfs_overlay/etc/hostapd.conf",
+    "buildroot-external/board/arkmicro/ark1668_tyw_zksw/rootfs_overlay/etc/hostapd/hostapd.conf",
+    "buildroot-external/board/arkmicro/ark1668e_devb/rootfs_overlay/etc/hostapd/hostapd.conf",
+    "buildroot-external/board/arkmicro/ark1668e_devb_dashboard/rootfs_overlay/etc/hostapd/hostapd.conf",
+    "buildroot-external/board/arkmicro/ark1668e_devb_emmc/rootfs_overlay/etc/hostapd/hostapd.conf",
+    "buildroot-external/board/arkmicro/arkn141-cardvr/rootfs_overlay/etc/hostapd.conf",
+    "buildroot-external/board/arkmicro/arkn141-dongle/rootfs_overlay/etc/hostapd.conf",
+    "buildroot-external/board/arkmicro/arkn141-shoulang/rootfs_overlay/etc/hostapd.conf",
+    "buildroot-external/board/arkmicro/arkn141_dongle_sim/rootfs_overlay/etc/hostapd.conf",
+    "buildroot-external/board/arkmicro/arkn141_dongle_sim/rootfs_overlay/etc/hostapd/hostapd.conf",
+    "buildroot-external/board/arkmicro/arkn141_dongle_xinshiyu/rootfs_overlay/etc/hostapd.conf",
+    "buildroot-external/board/arkmicro/arkn141_dongle_xinshiyu/rootfs_overlay/etc/hostapd/hostapd.conf",
+    "buildroot-external/board/arkmicro/arkn141_zhonghong/rootfs_overlay/etc/hostapd.conf",
+    "buildroot-external/board/arkmicro/arkn141_zhonghong/rootfs_overlay/etc/hostapd/hostapd.conf",
+    "buildroot-external/board/arkmicro/xinshiyu/rootfs_overlay/etc/hostapd/hostapd.conf"
+  ],
+  "sanitized_commit": "63b44c2d6db2cf800601e947a7c4e18c44e223d1",
+  "sanitized_tree": "6c296d6ae5292d4abbafa5e6c9e953937e022984",
+  "exclusions_sha256": "dcabaa01105f8353a2a86b73fd0a4bec61718e487a2cd8c108d81a7f13ded6f4",
+  "patches": {
+    "0001-reviewed-host-tools.patch": "968050e1fe638aa61a0b1d9cf42bcdef3c95a0d9e2282b215b91eedf53b94db6",
+    "0002-input-bounds.patch": "88cc53b1ed219bf9ec62c7ff896a76dcde42e529baba66e6cbc2ef90dc6f4194",
+    "0003-quarantine-gates.patch": "8ff964e5613a2f466a15b1b45e310ef5925727fa6ed019c8f6ff72a374defd9e",
+    "0004-restore-upstream-security.patch": "465f94dac107acd0990890e3c843de64e3e6721d0e8338fd8c827f34d2d4dea5"
+  },
+  "full_firmware_enabled": false,
+  "snapshot": {
+    "path": "dist/bsp/bm168-bsp-sanitized.tar.gz",
+    "tree": "6c296d6ae5292d4abbafa5e6c9e953937e022984",
+    "entries": 106422,
+    "sha256": "66f65621deddbf96e1eef967aca0001c76daefe66b0906fc85d84e6802299f5e",
+    "size": 508917408
+  }
+}

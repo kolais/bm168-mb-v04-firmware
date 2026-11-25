@@ -1,0 +1,30 @@
+// SPDX-License-Identifier: GPL-2.0
+// Wi-Fi RAM probe: the read-only storage platform plus the SDIO host that
+// carries the RTL8821CS. Values follow docs/wifi-board-glue.md: dw_mmc.1 at
+// 0xec800000, VIC-high IRQ 6, 24 MHz CIU, 4-bit, caps 0x7, no software
+// power control. Polled SDIO interrupts like stock (no cap-sdio-irq) and
+// PIO only (no dmas). Pinmux is inherited from U-Boot, which initialises
+// ARK_MMC1; this tree writes no pinmux registers.
+#include "bm168-readonly.dts"
+/ {
+    model = "BM168 Wi-Fi probe (RAM)";
+    ahb {
+        mmc1: mmc@ec800000 {
+            compatible = "snps,dw-mshc";
+            #address-cells = <1>;
+            #size-cells = <0>;
+            reg = <0xec800000 0x1000>;
+            interrupt-parent = <&vich>;
+            interrupts = <6>;
+            fifo-depth = <32>;
+            clocks = <&xtal24mhz>;
+            clock-names = "ciu";
+            bus-width = <4>;
+            max-frequency = <24000000>;
+            cap-sd-highspeed;
+            cap-mmc-highspeed;
+            non-removable;
+            disable-wp;
+        };
+    };
+};

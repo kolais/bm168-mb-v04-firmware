@@ -1,0 +1,16 @@
+#!/bin/sh
+export PATH=/bin
+export HOME=/root
+export PS1='ram-recovery # '
+/bin/busybox mount -t proc proc /proc
+/bin/busybox mount -t sysfs sysfs /sys
+/bin/busybox mount -t devtmpfs devtmpfs /dev
+exec </dev/console >/dev/console 2>&1
+echo AUTOTOP_RAM_RECOVERY_READY
+echo 'RAM-only console probe. NAND, MCU, USB and display drivers are disabled.'
+/bin/busybox uname -a
+/bin/busybox cat /proc/cmdline /proc/mounts
+while :; do
+    /bin/sh -i
+    echo 'Shell exited; starting another shell.'
+done

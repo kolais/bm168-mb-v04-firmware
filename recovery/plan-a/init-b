@@ -1,0 +1,99 @@
+#!/bin/sh
+# Plan A init on its own root (option B, docs/plan-a-persistent-image.md):
+# the kernel mounts the Plan A squashfs read-only as / (NAND: UBI volume
+# through ubiblock; rehearsal: the same file from the U DISK stick, entered
+# by chroot from a small initramfs) and runs this as PID 1. It rebuilds the
+# environment the RAM spike's /init gives plana-up.sh: the squashfs bound at
+# /mnt/stock, the session's files at /mnt/usb, then starts the session.
+#
+# Session files (PLANA.CFG, DATA*.TAR, GOC*.TAR):
+#   NAND:      tar archive in the static UBI volume ubi0_1 (plana-state),
+#              unpacked into RAM
+#   rehearsal: the U DISK stick, mounted read-only
+# NAND stays read-only: every partition is read-only in the DT and the NAND
+# driver blocks erase/program; UBI attaches in read-only mode.
+#
+# The one exception, with a kernel that has the state window
+# (recovery/patches-state): the stock userdata partition. The driver starts
+# disarmed; it is armed here (/opt/autotop/state-mount), UBI attaches the
+# partition as ubi1 and stock's own filesystem is mounted read-only at
+# /mnt/state. What the driver changed
+# on the unit (pairings, settings, the name) is kept there by
+# /opt/autotop/state-save, in a directory of our own, and loaded by
+# plana-up.sh in place of the session's archives.
+B=/bin/busybox
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export HOME=/root
+export PS1='plana-b # '
+$B mount -t proc proc /proc
+$B mount -t sysfs sysfs /sys
+$B mountpoint -q /dev || $B mount -t devtmpfs devtmpfs /dev
+exec </dev/console >/dev/console 2>&1
+echo 'Plan A option B init: read-only squashfs root; NAND read-only.'
+$B mount -t tmpfs -o mode=1777 tmpfs /tmp
+$B mount -t tmpfs -o mode=755 tmpfs /mnt
+$B mkdir -p /mnt/stock /mnt/usb
+$B mount --bind / /mnt/stock
+
+if test -e /dev/ubi0_1; then
+    $B mount -t tmpfs -o mode=700 tmpfs /mnt/usb
+    $B tar -x -f /dev/ubi0_1 -C /mnt/usb && echo 'session files from UBI volume plana-state'
+else
+    mode=/sys/bus/platform/devices/musb-hdrc.1/mode
+    test -w "$mode" && echo host > "$mode" 2>/dev/null
+    count=0
+    while ! test -b /dev/sda1 && test "$count" -lt 20; do
+        $B sleep 1
+        count=$((count + 1))
+    done
+    test -b /dev/sda1 &&
+        $B mount -t vfat -o ro,nosuid,nodev,noexec /dev/sda1 /mnt/usb &&
+        echo 'session files from the U DISK stick'
+fi
+$B ifconfig lo 127.0.0.1 up
+
+# state-mount arms the window, attaches and mounts; a partition that cannot
+# be read (twice) it makes anew, so the unit keeps things again by itself.
+for s in /sys/bus/platform/devices/*/autotop_state; do
+    test -w "$s" || continue
+    /opt/autotop/state-mount "$s"
+done
+
+# Developer access (a shell over the unit's Wi-Fi, for the holder of a key
+# built into the image): started here if it was switched on, by the system
+# and not by the app, so it is there whatever an app update does.
+test -x /opt/autotop/dev-access && /opt/autotop/dev-access start < /dev/null
+
+# Our own part of the image may have a newer copy on the state partition
+# (a signed bundle, installed over the unit's Wi-Fi): app-slot puts it over
+# the image's, or leaves the image's when there is none or it is not right.
+# A newly installed one runs on trial; if it does not confirm, the unit
+# restarts and, the second time, goes back to what it ran before.
+if test -x /opt/autotop/app-slot; then
+    /opt/autotop/app-slot select
+    /opt/autotop/app-slot watch < /dev/null &
+fi
+
+cfg=/mnt/usb/PLANA.CFG
+if test -f "$cfg"; then
+    for key in DATA GOC MCU_ALLOW LAUNCHER AP_SSID AP_PSK PROFILE_PHONES PROFILE_SWITCH \
+        CONNECT_AT_IGNITION OFFER_OTHER_PHONE VISUAL_EFFECTS LAUNCHER_CTL BENCH; do
+        val=$($B sed -n "s/^$key=\([A-Za-z0-9._: ]*\)\r*$/\1/p" "$cfg" | $B head -1)
+        test -n "$val" && export "$key=$val"
+    done
+    echo "Plan A autostart: data ${DATA:-DATA.TAR}, pairing ${GOC:-GOC.TAR}"
+    (
+        /mnt/stock/opt/autotop/plana-up.sh base &&
+            /mnt/stock/opt/autotop/plana-up.sh run
+        echo "plana-auto: exit $?"
+    ) > /tmp/plana-auto.log 2>&1 < /dev/null &
+else
+    echo 'no PLANA.CFG: no session started'
+fi
+echo AUTOTOP_PLANA_B_READY
+$B uname -a
+$B cat /proc/mtd /proc/mounts
+while :; do
+    /bin/sh -i
+    echo 'Shell exited; starting another shell.'
+done

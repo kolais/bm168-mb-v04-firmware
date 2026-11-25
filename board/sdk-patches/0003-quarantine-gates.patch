@@ -1,0 +1,20 @@
+--- a/buildroot-external/package/carlink/carlink.mk
++++ b/buildroot-external/package/carlink/carlink.mk
+@@ -1,3 +1,9 @@
++# Operational private-key-bearing dependencies were removed by the BSP audit.
++# Rebuild/replace the receiver and its dependency closure before enabling it.
++ifeq ($(BR2_PACKAGE_CARLINK),y)
++$(error Vendor carlink is quarantined: replace the embedded-key Android Auto/ECSDK dependencies)
++endif
++
+ ################################################################################
+ #
+ # carlink libs and demo
+--- a/build/build.sh
++++ b/build/build.sh
+@@ -1,4 +1,5 @@
+ #!/bin/bash -e
++set -e
+ SCRIPTS_DIR=`cd $(dirname $0); pwd -P`
+ if [ ! -f "$SCRIPTS_DIR/$1.config" ]; then
+ 	echo "Error! No such board config file $1.config."

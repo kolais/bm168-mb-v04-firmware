@@ -1,0 +1,6 @@
+ubi-reader==0.8.16
+cryptography==50.0.0
+lzallright==0.2.6
+zstandard==0.25.0
+cffi==2.0.0
+pycparser==2.23

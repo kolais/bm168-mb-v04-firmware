@@ -1,0 +1,66 @@
+#!/bin/sh
+# The state partition at start (init-b): stock's userdata, the one part of
+# the flash that is written at run time (recovery/patches-state). Arms the
+# driver's window, attaches the partition as ubi1 and mounts its filesystem
+# read-only at /mnt/state.
+#
+# If that fails twice, the partition is made anew: erased, attached (UBI
+# formats an empty partition by itself; sys/ubi-attach, so that UBI holds
+# back 2 blocks for bad ones as stock's does, not 20 of the 48), the volume
+# created and an empty filesystem put on it. What was kept is lost then (pairings, settings, a
+# kept app update; the image's own copies stand in), but the unit keeps
+# things again from this start on, instead of keeping nothing until someone
+# repairs it by hand. Nothing is erased unless the driver took the arming
+# (so it is there and works) and both attempts to read the partition failed.
+#
+#   state-mount WINDOW_FILE     the driver's autotop_state file in sysfs
+#
+# Exit: 0 mounted; 1 not (the window is disarmed again). One line says which.
+B=${B:-/bin/busybox}
+SYS=${SYS:-/opt/autotop/sys}
+STATE=${STATE:-/mnt/state}
+W=$1
+MTD=${MTD:-/proc/mtd}
+say() { echo "state: $*"; }
+
+take() {
+    $B ubiattach -m "$n" -d 1 /dev/ubi_ctrl > /dev/null 2>&1 &&
+        $B mount -t ubifs -o ro ubi1:userdata $STATE 2> /dev/null
+}
+# busybox's ubidetach wants the control device named, or it only prints its usage.
+drop() { $B ubidetach -d 1 /dev/ubi_ctrl 2> /dev/null; }
+
+n=$($B sed -n 's/^mtd\([0-9]*\):.*"userdata"$/\1/p' $MTD)
+$B mkdir -p $STATE
+if [ -z "$n" ] || ! echo 'arm 7260000 600000' > "$W"; then
+    say 'userdata NOT mounted (no partition or no window); this session keeps nothing'
+    exit 1
+fi
+if take; then
+    say 'userdata attached (ubi1), mounted read-only at /mnt/state'
+    exit 0
+fi
+drop
+$B sleep ${STATE_RETRY_S:-2}
+if take; then
+    say 'userdata attached (ubi1) at the second attempt, mounted read-only at /mnt/state'
+    exit 0
+fi
+drop
+say 'userdata could not be read, twice: making it anew (what was kept is lost)'
+if $B flash_eraseall /dev/mtd$n > /dev/null 2>&1 &&
+        $SYS/ubi-attach "$n" 1 2 > /dev/null 2>&1 &&
+        $B ubimkvol /dev/ubi1 -N userdata -m > /dev/null 2>&1 &&
+        $B mount -t ubifs ubi1:userdata $STATE &&
+        $B mkdir -p $STATE/autotop &&
+        echo "made anew at start, uptime $($B cut -d' ' -f1 /proc/uptime 2> /dev/null) s" > $STATE/autotop/made-anew &&
+        $B sync &&
+        $B mount -o remount,ro $STATE; then
+    say 'userdata made anew, mounted read-only at /mnt/state'
+    exit 0
+fi
+$B umount $STATE 2> /dev/null
+drop
+echo disarm > "$W"
+say 'userdata NOT mounted and could not be made anew; this session keeps nothing'
+exit 1

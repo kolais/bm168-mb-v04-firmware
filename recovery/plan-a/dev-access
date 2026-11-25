@@ -1,0 +1,136 @@
+#!/bin/sh
+# Developer access: a shell on the unit over its own Wi-Fi, for whoever holds
+# the private half of a key built into the image (sys/authorized_keys; an
+# image built without one has no developer access at all). Off unless it was
+# switched on in the launcher (System); the choice and the server's own key
+# are kept on the state partition, so the unit is known by the same key
+# after every start and every reinstall. Part of the system, not of the app:
+# it is started here at boot, whatever the app does.
+#
+#   dev-access start     at start (init-b): run the server if it is switched on
+#   dev-access on        switch it on, now and for the starts to come
+#   dev-access off       switch it off and end every session
+#   dev-access status    three lines: "available yes|no", "on yes|no", "running yes|no"
+#
+# The server is Dropbear (recovery/plan-a/dropbear-options.h): keys only, no
+# passwords, nothing forwarded. From the Mac, on the unit's Wi-Fi:
+#   ssh -i KEY root@192.168.43.1        scp -O -i KEY root@192.168.43.1:/tmp/launcherd.log .
+#
+# Exit: 0 done; 1 not available or failed (a line says why).
+B=${B:-/bin/busybox}
+SYS=${SYS:-/opt/autotop/sys}
+STATE=${STATE:-/mnt/state}
+D=$STATE/autotop
+T=${T:-/tmp}
+FLAG=$D/dev-access
+PID=$T/dropbear.pid
+
+say() { echo "dev-access: $*"; }
+available() { [ -s $SYS/authorized_keys ] && [ -x $SYS/dropbear ] && [ -x $SYS/dev-shell ]; }
+have_state() {
+    [ -n "${DEV_ACCESS_TEST:-}" ] && { [ -z "${DEV_ACCESS_NO_STATE:-}" ]; return; }
+    $B grep -q " $STATE ubifs " /proc/mounts
+}
+is_on() { [ -f $FLAG ] || [ -f $T/dev-access.on ]; }
+running() { [ -s $PID ] && $B kill -0 "$($B cat $PID)" 2> /dev/null; }
+
+# The partition is read-only except while one of us writes (state-save and
+# app-slot too: the same lock).
+writable() {
+    [ -n "${DEV_ACCESS_TEST:-}" ] && { $B mkdir -p $D; return 0; }
+    n=0
+    until $B mkdir /tmp/state-save.lock 2> /dev/null; do
+        n=$((n + 1))
+        [ $n -gt 20 ] && return 1
+        $B sleep 1
+    done
+    $B mount -o remount,rw $STATE && $B mkdir -p $D && return 0
+    $B rmdir /tmp/state-save.lock
+    return 1
+}
+readonly_again() {
+    [ -n "${DEV_ACCESS_TEST:-}" ] && return 0
+    $B sync
+    $B mount -o remount,ro $STATE
+    $B rmdir /tmp/state-save.lock
+}
+
+# The server's own key: the kept one; made once, written beside and renamed.
+# Without a state partition, one for this session only.
+hostkey() {
+    [ -s $D/dev-hostkey ] && { echo $D/dev-hostkey; return 0; }
+    if have_state && writable; then
+        $B rm -f $D/dev-hostkey.new
+        $SYS/dropbearkey -t ed25519 -f $D/dev-hostkey.new > /dev/null 2>&1 &&
+            $B mv $D/dev-hostkey.new $D/dev-hostkey
+        $B rm -f $D/dev-hostkey.new $D/dev-hostkey.new.pub	# the tool writes the public half beside: not needed
+        readonly_again
+        [ -s $D/dev-hostkey ] && { echo $D/dev-hostkey; return 0; }
+    fi
+    [ -s $T/dev-hostkey ] || $SYS/dropbearkey -t ed25519 -f $T/dev-hostkey > /dev/null 2>&1 || return 1
+    echo $T/dev-hostkey
+}
+
+# The server takes a key list only from a directory that is root's all the
+# way up, or up to root's home. Nothing in the image is: stock's directories
+# belong to its builder (user 1000) and / is group-writable. So root gets a
+# home in RAM (/root, where only stock's unused .profile lay) and the list
+# is put there.
+keys_home() {
+    [ -n "${DEV_ACCESS_TEST:-}" ] && return 0
+    $B grep -q ' /root tmpfs ' /proc/mounts || $B mount -t tmpfs -o mode=700 tmpfs /root || return 1
+    $B mkdir -p /root/.ssh && $B chmod 700 /root/.ssh &&
+        $B cp $SYS/authorized_keys /root/.ssh/authorized_keys && $B chmod 600 /root/.ssh/authorized_keys
+}
+
+serve() {
+    running && return 0
+    key=$(hostkey) || { say 'no key for the server could be made'; return 1; }
+    keys_home || { say "the key list could not be put in root's home"; return 1; }
+    [ -d /dev/pts ] || [ -n "${DEV_ACCESS_TEST:-}" ] || { $B mkdir -p /dev/pts; $B mount -t devpts devpts /dev/pts; }
+    # -c: every session through dev-shell, which never starts a login shell
+    # (the image's /etc/profile is stock's start-up and must not run again).
+    $SYS/dropbear -r "$key" -c $SYS/dev-shell -p ${DEV_PORT:-22} -P $PID >> $T/dropbear.log 2>&1 ||
+        { say 'the server did not start'; return 1; }
+    case "$key" in $D/*) say 'the server runs' ;; *) say 'the server runs, with a key for this session only' ;; esac
+}
+
+case "${1:-}" in
+start)
+    is_on || exit 0
+    available || { say 'switched on, but this image has no key: not started'; exit 1; }
+    serve
+    ;;
+on)
+    available || { say 'not available: this image has no key'; exit 1; }
+    if have_state && writable; then
+        : > $FLAG
+        readonly_again
+    else
+        : > $T/dev-access.on
+        say 'no state partition: on for this session only'
+    fi
+    serve
+    ;;
+off)
+    if [ -f $FLAG ] && writable; then
+        $B rm -f $FLAG
+        readonly_again
+    fi
+    $B rm -f $T/dev-access.on
+    running && $B kill "$($B cat $PID)"
+    [ -n "${DEV_ACCESS_TEST:-}" ] || $B killall dropbear 2> /dev/null	# the sessions too
+    $B rm -f $PID
+    [ -f $FLAG ] && { say 'could not be switched off for the next start'; exit 1; }
+    say 'off'
+    ;;
+status)
+    available && echo 'available yes' || echo 'available no'
+    is_on && echo 'on yes' || echo 'on no'
+    running && echo 'running yes' || echo 'running no'
+    ;;
+*)
+    echo 'usage: dev-access start|on|off|status' >&2
+    exit 1
+    ;;
+esac

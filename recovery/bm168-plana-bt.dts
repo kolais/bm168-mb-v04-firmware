@@ -1,0 +1,24 @@
+// SPDX-License-Identifier: GPL-2.0
+// Plan A option B rehearsal: the option B kernel with a small initramfs
+// (recovery/init-plana-bt) that mounts the Plan A squashfs from the U DISK
+// stick and enters its own init. Loaded from USB like the RAM spike; NAND
+// stays read-only (all partitions read-only, driver blocks erase/program).
+#include "bm168-spike.dts"
+/ {
+    model = "BM168 Plan A option B rehearsal (RAM)";
+    chosen {
+        bootargs = "console=ttyS0,115200n8 earlyprintk mem=180M cma=0 rdinit=/init clk_ignore_unused panic=0";
+    };
+};
+#ifdef STATE_WINDOW
+// The state window (recovery/patches-state): the stock userdata partition,
+// and nothing else, may be erased and programmed at run time. The driver
+// holds the same window and starts disarmed; init-b arms it before UBI
+// attaches. Every other partition keeps its read-only flag.
+&nfc {
+    autotop,state-window = <0x7260000 0x600000>;
+    partitions {
+        partition@7260000 { /delete-property/ read-only; };
+    };
+};
+#endif

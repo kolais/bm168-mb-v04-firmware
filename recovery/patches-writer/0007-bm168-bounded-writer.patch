@@ -1,0 +1,438 @@
+--- a/drivers/mtd/nand/raw/ark_nand.c
++++ b/drivers/mtd/nand/raw/ark_nand.c
+@@ -31,6 +31,7 @@
+ #include <linux/interrupt.h>
+ #include <linux/iopoll.h>
+ #include <linux/reset.h>
++#include "bm168_nand_format.h"
+ 
+ /* NAND Flash Controller */
+ #define rNAND_CR                                (0x00)
+@@ -105,8 +106,22 @@
+ 	int raw_rw;
+ 	struct nand_chip nand;
+ 	struct completion complete;
++	/*
++	 * AUTOTOP bounded writer. Without a DT window the driver is read-only as
++	 * in R7. With one, only ark_writer_* may issue erase/program commands,
++	 * only inside the window and only while armed through sysfs.
++	 */
++	bool window_present;
++	u64 window_start, window_size;
++	bool armed;
++	bool writer_cmd;	/* write-class commands permitted for this sequence */
++	bool writer_fault;	/* a data transfer was refused; never PAGEPROG */
++	unsigned long erases, programs, rejects;
+ };
+ 
++#define ARK_WRITER_PROG_TIMEOUT_US	5000
++#define ARK_WRITER_ERASE_TIMEOUT_US	20000
++
+ static inline struct ark_nfc *to_ark_nfc(struct nand_chip *nand)
+ {
+ 	return container_of(nand, struct ark_nfc, nand);
+@@ -580,6 +595,13 @@
+ 			case NAND_CMD_GET_FEATURES:
+ 			case NAND_CMD_RESET:
+ 				break;
++			case NAND_CMD_SEQIN:
++			case NAND_CMD_PAGEPROG:
++			case NAND_CMD_ERASE1:
++			case NAND_CMD_ERASE2:
++				if (nfc->writer_cmd)
++					break;
++				/* fall through */
+ 			default:
+ 				dev_err(nfc->dev, "read-only recovery blocked NAND command 0x%x\n", cmd);
+ 				return;
+@@ -690,11 +712,181 @@
+ }
+ 
+ 
++/*
++ * Raw data input for an authorized program sequence only: whole main area or
++ * whole spare area, 32-bit writes to the data register (the path R7's raw
++ * reads use). Anything else marks the sequence faulty so PAGEPROG is skipped.
++ */
+ static void ark_nfc_write_buf(struct mtd_info *mtd, const uint8_t *buf, int len)
+ {
+-	pr_err_ratelimited("AUTOTOP read-only NAND: data write blocked\n");
++	struct nand_chip *chip = mtd_to_nand(mtd);
++	struct ark_nfc *nfc = to_ark_nfc(chip);
++	union {
++		u32 word;
++		u8 byte[4];
++	} tmp;
++	int i;
++
++	if (!nfc->writer_cmd || (len != mtd->writesize && len != mtd->oobsize)) {
++		nfc->writer_fault = true;
++		pr_err_ratelimited("AUTOTOP NAND: data write blocked (len %d)\n", len);
++		return;
++	}
++	for (i = 0; i < len; i += 4) {
++		memcpy(tmp.byte, buf + i, 4);
++		writel(tmp.word, nfc->regs + rNAND_DATA);
++	}
++}
++
++static bool ark_writer_allowed(struct ark_nfc *nfc, u64 addr, u64 len,
++			       const char *op)
++{
++	if (nfc->window_present && READ_ONCE(nfc->armed) &&
++	    bm168_window_contains(nfc->window_start, nfc->window_size, addr, len))
++		return true;
++	nfc->rejects++;
++	dev_err(nfc->dev, "AUTOTOP writer rejected %s at 0x%llx+0x%llx (armed=%d)\n",
++		op, addr, len, READ_ONCE(nfc->armed));
++	return false;
++}
++
++/* Bounded ready wait, then require ready, not write-protected and no failure. */
++static int ark_writer_wait(struct mtd_info *mtd, struct nand_chip *chip,
++			   unsigned int timeout_us)
++{
++	unsigned int waited = 0;
++	u8 status;
++
++	ndelay(100);	/* tWB */
++	while (!chip->dev_ready(mtd)) {
++		if (waited >= timeout_us)
++			return -ETIMEDOUT;
++		udelay(5);
++		waited += 5;
++	}
++	nand_status_op(chip, &status);
++	if (!(status & NAND_STATUS_READY))
++		return -ETIMEDOUT;
++	if (!(status & NAND_STATUS_WP))
++		return -EROFS;
++	if (status & NAND_STATUS_FAIL)
++		return -EIO;
++	return 0;
++}
++
++static void ark_writer_begin(struct ark_nfc *nfc)
++{
++	/* Raw data path: the BCH engine must not process or append anything. */
++	writel(readl(nfc->regs + rBCH_CR) &
++	       ~(BCH_CR_BCH_ENABLE | BCH_CR_SOFT_ECC_ENABLE), nfc->regs + rBCH_CR);
++	nfc->writer_fault = false;
++	nfc->writer_cmd = true;
++}
++
++static int ark_writer_write_page_raw(struct mtd_info *mtd, struct nand_chip *chip,
++				     const uint8_t *buf, int oob_required, int page)
++{
++	struct ark_nfc *nfc = to_ark_nfc(chip);
++	u64 addr = (u64)page << chip->page_shift;
++	int ret;
++
++	if (!ark_writer_allowed(nfc, addr, mtd->writesize, "program"))
++		return -EPERM;
++	/* Only complete stock-format pages: reserved/free OOB 0xff, parity exact. */
++	if (!oob_required || bm168_check_page(buf, chip->oob_poi)) {
++		nfc->rejects++;
++		dev_err(nfc->dev, "AUTOTOP writer rejected non-stock page at 0x%llx\n", addr);
++		return -EINVAL;
++	}
++	ark_writer_begin(nfc);
++	chip->cmdfunc(mtd, NAND_CMD_SEQIN, 0x00, page);
++	chip->write_buf(mtd, buf, mtd->writesize);
++	chip->write_buf(mtd, chip->oob_poi, mtd->oobsize);
++	if (nfc->writer_fault) {
++		nfc->writer_cmd = false;
++		chip->cmdfunc(mtd, NAND_CMD_RESET, -1, -1);	/* abandon data input */
++		nfc->rejects++;
++		return -EIO;
++	}
++	chip->cmdfunc(mtd, NAND_CMD_PAGEPROG, -1, -1);
++	nfc->writer_cmd = false;
++	ret = ark_writer_wait(mtd, chip, ARK_WRITER_PROG_TIMEOUT_US);
++	if (ret) {
++		dev_err(nfc->dev, "AUTOTOP writer program failed at 0x%llx: %d\n", addr, ret);
++		return ret;
++	}
++	nfc->programs++;
++	return 0;
+ }
+ 
++static int ark_writer_erase(struct mtd_info *mtd, int page)
++{
++	struct nand_chip *chip = mtd_to_nand(mtd);
++	struct ark_nfc *nfc = to_ark_nfc(chip);
++	u64 addr = (u64)page << chip->page_shift;
++	int ret;
++
++	if ((addr & (mtd->erasesize - 1)) ||
++	    !ark_writer_allowed(nfc, addr, mtd->erasesize, "erase"))
++		return -EPERM;
++	ark_writer_begin(nfc);
++	chip->cmdfunc(mtd, NAND_CMD_ERASE1, -1, page);
++	chip->cmdfunc(mtd, NAND_CMD_ERASE2, -1, -1);
++	nfc->writer_cmd = false;
++	ret = ark_writer_wait(mtd, chip, ARK_WRITER_ERASE_TIMEOUT_US);
++	if (ret) {
++		dev_err(nfc->dev, "AUTOTOP writer erase failed at 0x%llx: %d\n", addr, ret);
++		return ret;
++	}
++	nfc->erases++;
++	dev_info(nfc->dev, "AUTOTOP writer erased 0x%llx\n", addr);
++	return 0;
++}
++
++static int ark_writer_refuse_oob(struct mtd_info *mtd, struct nand_chip *chip, int page)
++{
++	return -EROFS;
++}
++
++static int ark_writer_refuse_markbad(struct mtd_info *mtd, loff_t ofs)
++{
++	return -EROFS;
++}
++
++static ssize_t autotop_writer_show(struct device *dev, struct device_attribute *attr,
++				   char *buf)
++{
++	struct ark_nfc *nfc = dev_get_drvdata(dev);
++
++	return sprintf(buf, "window=0x%llx+0x%llx armed=%d erases=%lu programs=%lu rejects=%lu\n",
++		       nfc->window_start, nfc->window_size, READ_ONCE(nfc->armed),
++		       nfc->erases, nfc->programs, nfc->rejects);
++}
++
++/* "arm <start> <size>" must repeat the DT window exactly; "disarm" always works. */
++static ssize_t autotop_writer_store(struct device *dev, struct device_attribute *attr,
++				    const char *buf, size_t count)
++{
++	struct ark_nfc *nfc = dev_get_drvdata(dev);
++	unsigned long long start, size;
++	char verb[8];
++
++	if (sscanf(buf, "%7s", verb) != 1)
++		return -EINVAL;
++	if (!strcmp(verb, "disarm")) {
++		WRITE_ONCE(nfc->armed, false);
++		dev_info(dev, "AUTOTOP writer disarmed\n");
++		return count;
++	}
++	if (strcmp(verb, "arm") || sscanf(buf, "%*s %llx %llx", &start, &size) != 2 ||
++	    start != nfc->window_start || size != nfc->window_size)
++		return -EINVAL;
++	WRITE_ONCE(nfc->armed, true);
++	dev_info(dev, "AUTOTOP writer ARMED for 0x%llx+0x%llx\n", start, size);
++	return count;
++}
++static DEVICE_ATTR_RW(autotop_writer);
++
+ static int ark_nand_chip_init(struct device *dev, struct ark_nfc *nfc)
+ {
+ 	struct mtd_info *mtd;
+@@ -704,7 +896,9 @@
+ 	nand = &nfc->nand;
+ 
+ 	nand->chip_delay = 100;
+-	nand->options |= NAND_ROM | NAND_SKIP_BBTSCAN;
++	nand->options |= NAND_SKIP_BBTSCAN;
++	if (!nfc->window_present)
++		nand->options |= NAND_ROM;
+ 	nand->controller = &nfc->controller;
+ 	/*
+ 	 * Set the ECC mode to the default value in case nothing is specified
+@@ -738,8 +932,16 @@
+ 		return -EINVAL;
+ 	}
+ 	dev_info(dev, "AUTOTOP contiguous OOB: marker byte 0, pages 0/1, no flash BBT\n");
+-	mtd->flags &= ~MTD_WRITEABLE;
+-	dev_info(dev, "AUTOTOP NAND read-only: ROM, no BBT scan, command guard active\n");
++	/* Never mark blocks bad and never write from a panic path. */
++	mtd->_block_markbad = NULL;
++	mtd->_panic_write = NULL;
++	if (nfc->window_present) {
++		dev_info(dev, "AUTOTOP bounded writer: window 0x%llx+0x%llx, DISARMED, stock-format raw pages only\n",
++			 nfc->window_start, nfc->window_size);
++	} else {
++		mtd->flags &= ~MTD_WRITEABLE;
++		dev_info(dev, "AUTOTOP NAND read-only: ROM, no BBT scan, command guard active\n");
++	}
+ 	ret = mtd_device_register(mtd, NULL, 0);
+ 	if (ret) {
+ 		dev_err(dev, "failed to register mtd device: %d\n", ret);
+@@ -771,6 +973,13 @@
+ 		dev_err(nfc->dev, "ECC init failed: %d\n", ret);
+ 		return ret;
+ 	}
++	/* Identification has set the defaults; replace every write entry point. */
++	nand->erase = ark_writer_erase;
++	nand->block_markbad = ark_writer_refuse_markbad;
++	nand->ecc.write_page_raw = ark_writer_write_page_raw;
++	nand->ecc.write_subpage = NULL;
++	nand->ecc.write_oob = ark_writer_refuse_oob;
++	nand->ecc.write_oob_raw = ark_writer_refuse_oob;
+ 
+ 	return 0;
+ }
+@@ -802,7 +1011,19 @@
+ 	if (!of_property_read_u32(np, "max-chips", &val)) {
+ 		nfc->max_chips = val;
+ 	}
++	if (of_find_property(np, "autotop,write-window", NULL)) {
++		u32 w[2];
+ 
++		if (of_property_read_u32_array(np, "autotop,write-window", w, 2) ||
++		    !bm168_window_valid(w[0], w[1])) {
++			dev_err(dev, "AUTOTOP writer: invalid write window\n");
++			return -EINVAL;
++		}
++		nfc->window_present = true;
++		nfc->window_start = w[0];
++		nfc->window_size = w[1];
++	}
++
+ 	nfc->regs = of_iomap(np, 0);
+ 	if (IS_ERR(nfc->regs))
+ 		return PTR_ERR(nfc->regs);
+@@ -827,6 +1048,13 @@
+ 		dev_err(dev, "failed to init nand chips\n");
+ 		return ret;
+ 	}
++	if (nfc->window_present) {
++		ret = device_create_file(dev, &dev_attr_autotop_writer);
++		if (ret) {
++			ark_nand_chips_cleanup(nfc);
++			return ret;
++		}
++	}
+ 
+ 	return 0;
+ }
+--- /dev/null
++++ b/drivers/mtd/nand/raw/bm168_nand_format.h
+@@ -0,0 +1,127 @@
++/* SPDX-License-Identifier: GPL-2.0 OR MIT */
++/*
++ * BM168 stock normal-partition NAND page format (docs/nand-ecc-format.md).
++ *
++ * Shared, dependency-free code used by the bounded writer kernel patch and by
++ * the user-space nand-restore tool, and tested natively against
++ * tools/nand_ecc.py and the saved captures. Keep this file byte-identical to
++ * the copy added by recovery/patches-writer/0007-bm168-bounded-writer.patch;
++ * the recovery build checks that.
++ *
++ * BCH over GF(2^14), primitive polynomial 0x4443, t = 7 (98 parity bits).
++ * Data bits enter least-significant bit first, byte 0 first. The remainder
++ * coefficient of x^(97-k) is stored in byte k/8, bit k%8; the final six bits
++ * are padding. Parity is XORed with a mask that makes all-0xff data produce
++ * all-0xff parity. OOB = ff ff ff | parity(step 0) | parity(step 1) | ff x 35.
++ */
++#ifndef BM168_NAND_FORMAT_H
++#define BM168_NAND_FORMAT_H
++
++#ifdef __KERNEL__
++#include <linux/types.h>
++#include <linux/string.h>
++#else
++#include <stdint.h>
++#include <string.h>
++#endif
++
++#define BM168_PAGE 2048u
++#define BM168_OOB 64u
++#define BM168_STEP 1024u
++#define BM168_PARITY 13u
++#define BM168_ERASE 131072u
++#define BM168_CHIP 134217728u
++/* Only kernel and rootfs may ever be inside a write window. */
++#define BM168_WINDOW_MIN 0x00160000u
++#define BM168_WINDOW_MAX 0x07260000u
++
++/* Generator polynomial without its x^98 term, 32-bit words, least significant first. */
++static const uint32_t bm168_bch_gen[4] = {
++	0x68459229u, 0x810480d0u, 0x4ec48cf8u, 0x00000003u,
++};
++static const uint8_t bm168_bch_mask[BM168_PARITY] = {
++	0xcc, 0x8a, 0x7a, 0xe8, 0xf6, 0x2c, 0x31, 0x52, 0x9a, 0xa2, 0xd2, 0x83, 0xff,
++};
++
++static inline void bm168_bch_parity(const uint8_t *data, uint8_t *out)
++{
++	uint32_t r[4] = { 0, 0, 0, 0 };
++	unsigned int i, j, k;
++
++	for (i = 0; i < BM168_STEP; i++) {
++		for (j = 0; j < 8; j++) {
++			uint32_t fb = ((data[i] >> j) & 1u) ^ ((r[3] >> 1) & 1u);
++
++			r[3] = ((r[3] << 1) | (r[2] >> 31)) & 3u;
++			r[2] = (r[2] << 1) | (r[1] >> 31);
++			r[1] = (r[1] << 1) | (r[0] >> 31);
++			r[0] <<= 1;
++			if (fb) {
++				r[0] ^= bm168_bch_gen[0];
++				r[1] ^= bm168_bch_gen[1];
++				r[2] ^= bm168_bch_gen[2];
++				r[3] ^= bm168_bch_gen[3];
++			}
++		}
++	}
++	memset(out, 0, BM168_PARITY);
++	for (k = 0; k < 98; k++) {
++		unsigned int bit = 97 - k;
++
++		if ((r[bit >> 5] >> (bit & 31)) & 1u)
++			out[k >> 3] |= (uint8_t)(1u << (k & 7));
++	}
++	for (k = 0; k < BM168_PARITY; k++)
++		out[k] ^= bm168_bch_mask[k];
++}
++
++/* Complete stock OOB for one 2,048-byte page. */
++static inline void bm168_page_oob(const uint8_t *page, uint8_t *oob)
++{
++	memset(oob, 0xff, BM168_OOB);
++	bm168_bch_parity(page, oob + 3);
++	bm168_bch_parity(page + BM168_STEP, oob + 3 + BM168_PARITY);
++}
++
++/* 0 when `oob` is exactly the stock OOB for `page`; never touches hardware. */
++static inline int bm168_check_page(const uint8_t *page, const uint8_t *oob)
++{
++	uint8_t expect[BM168_OOB];
++
++	bm168_page_oob(page, expect);
++	return memcmp(expect, oob, BM168_OOB) ? -1 : 0;
++}
++
++/* The boot picture's partition (U-Boot reads a JPEG from it): a window only
++ * for a writer built for it, with BM168_BOOTLOGO_WINDOW. Every other build
++ * refuses it as it refuses everything outside kernel/rootfs. */
++#define BM168_BOOTLOGO_START 0x07860000u
++#define BM168_BOOTLOGO_SIZE 0x00080000u
++
++/* A window is erase-aligned, non-empty and confined to kernel/rootfs. */
++static inline int bm168_window_valid(uint64_t start, uint64_t size)
++{
++#ifdef BM168_BOOTLOGO_WINDOW
++	/* Added before the rule and not woven into it: without the macro the
++	 * function is, token for token, the one the installed kernel was
++	 * built from, so that kernel still builds to the same bytes. */
++	if (size && !(start & (BM168_ERASE - 1)) && !(size & (BM168_ERASE - 1)) &&
++	    start >= BM168_BOOTLOGO_START && start - BM168_BOOTLOGO_START < BM168_BOOTLOGO_SIZE &&
++	    size <= BM168_BOOTLOGO_SIZE - (start - BM168_BOOTLOGO_START))
++		return 1;
++#endif
++	/* Masks, not '%': 64-bit division is unavailable in 32-bit ARM kernels. */
++	return size && !(start & (BM168_ERASE - 1)) && !(size & (BM168_ERASE - 1)) &&
++	       start >= BM168_WINDOW_MIN && start <= BM168_WINDOW_MAX &&
++	       size <= BM168_WINDOW_MAX - start;
++}
++
++/* [addr, addr + len) lies entirely inside a valid window. */
++static inline int bm168_window_contains(uint64_t start, uint64_t size,
++					uint64_t addr, uint64_t len)
++{
++	return bm168_window_valid(start, size) && len && addr >= start &&
++	       addr - start <= size && len <= size - (addr - start);
++}
++
++#endif
