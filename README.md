@@ -10,9 +10,10 @@ unit, and replaces what is around them:
 - a current Linux kernel build (4.19, from the SoC vendor's published tree)
   in place of the stock 3.4, with the flash read-only except for one small
   state area;
-- a new launcher (LVGL): CarPlay first, phones chosen by tile or by the
-  car's driver profile, a passenger's phone kept off hands-free and off the
-  unit's Wi-Fi, settings, the unit's own name;
+- a new launcher (LVGL): CarPlay first, phones chosen by tile or, with the
+  optional MCU patch, by the car's driver profile; a passenger's phone kept
+  off hands-free and off the unit's Wi-Fi; settings; the unit's own name
+  ([user manual](docs/manual.md));
 - app updates over the unit's own Wi-Fi from a phone's browser, signed with
   your key, with an automatic way back if the new one does not start;
 - a rescue stick that reinstalls kernel and root filesystem by itself;
@@ -39,9 +40,9 @@ unit, and replaces what is around them:
 2. Capture your unit's flash: [docs/stock-capture.md](docs/stock-capture.md).
 3. Make your keys and build: [docs/build.md](docs/build.md).
 4. Install with the rescue stick: [docs/install.md](docs/install.md).
-5. Afterwards: updates over Wi-Fi and the developer shell,
-   [docs/install.md](docs/install.md#app-updates) and
-   [docs/developer-access.md](docs/developer-access.md).
+5. Afterwards: using it ([docs/manual.md](docs/manual.md)), updates over
+   Wi-Fi ([docs/install.md](docs/install.md#app-updates)) and the developer
+   shell ([docs/developer-access.md](docs/developer-access.md)).
 
 ## What is where
 

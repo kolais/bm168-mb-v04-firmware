@@ -101,7 +101,7 @@ static void steps(const char *s)
 		} else if (*s == 'w') {
 			host_run(100);
 		} else if (*s == 'u') {	/* "Start" on the update's page: the receiving screen */
-			ui_nav_receive("BMW 28114", "h7Kp2mXq9RtB4wYz8NcL3vGs", "192.168.43.1", "Waiting for the update file");
+			ui_nav_receive("BMW 28114", "acorn4river7tulip2mango", "192.168.43.1", "Waiting for the update file");
 			host_run(0);
 		} else if (*s == 'm') {	/* a phone that could not be forgotten */
 			ui_nav_message("Couldn\xE2\x80\x99t forget ", "Work iPhone");
