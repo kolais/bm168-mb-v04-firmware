@@ -764,6 +764,113 @@ static void s_profile_without_phone(void)
 	NOT("mcu 4c 00 00");
 }
 
+/* A profile without a phone: the phone the driver then connects becomes
+ * that profile's phone, and is kept; the other profiles keep theirs. */
+static void s_profile_takes_phone(void)
+{
+	state_kept = 1;
+	start_up();
+	state_kept = 0;
+	profile(0x22);
+	run(1000);
+	CHECK(same(model()->chip_text, "No phone for profile 3"));
+	cursor = 0;
+	tap(640, 300);
+	tap(TILE_X(1), TILE_Y);	/* "Phone two" */
+	THEN("screen wait connecting");
+	run(5000);
+	bt("IS1");
+	run(3000);
+	THEN("bt CCAABBCCDDEE02");
+	NOT("put /data/autotop-profiles");	/* not before it has connected */
+	phone_answers("Phone two", "AA:BB:CC:DD:EE:02");
+	cp(3);
+	cp(62);
+	cp(4);
+	THEN("put /data/autotop-profiles 11 AA:BB:CC:DD:EE:01\n22 AA:BB:CC:DD:EE:02\naa -");
+	CHECK(model()->phones[1].profile == 3 && model()->phones[0].profile == 2);
+	CHECK(same(model()->chip_text, "Phone two"));
+}
+
+/* A profile that has its phone keeps it. */
+static void s_profile_keeps_its_phone(void)
+{
+	state_kept = 1;
+	drive_with_profile();
+	state_kept = 0;
+	NOT("put /data/autotop-profiles");	/* profile 2 has phone one: connecting it changes nothing */
+	CHECK(model()->phones[0].profile == 2 && model()->phones[1].profile == 1);
+}
+
+/* The knob while CarPlay has the screen is CarPlay's: a wheel step, select
+ * down and up, its Back key; the voice key is Siri. MENU stays the car's. */
+static void s_knob_in_carplay(void)
+{
+	drive_with_profile();
+	run(9000);	/* the banner is gone */
+	cursor = 0;
+	knob('r');
+	THEN("cp requestWheelStatus 0 0 1");
+	knob('l');
+	THEN("cp requestWheelStatus 0 0 -1");
+	knob('p');
+	THEN("cp requestWheelStatus 0 1 0");
+	THEN("cp requestWheelStatus 0 0 0");
+	knob('b');
+	THEN("cp requestKeyValue 3");
+	mcu(0xD0, 5, 0x4B, 0x81, 0x00, 0x25, 0x00);
+	run(10);
+	THEN("cp requestKeyValue 4");
+	NOT("screen list");	/* nothing of the launcher's moved */
+	knob('m');
+	THEN("screen cover");
+	NOT("cp requestKeyValue");
+}
+
+/* The car takes its picture back over a running CarPlay (a long MENU, which
+ * the MCU does by itself): the next touch brings the unit's picture, and is
+ * not passed to the CarPlay that nobody can see; the one after is CarPlay's. */
+static void s_car_picture_over_carplay(void)
+{
+	drive_with_profile();
+	run(9000);
+	cursor = 0;
+	tap(640, 300);
+	THEN("cp touch 1");	/* CarPlay has the screen: the touch is its own */
+	mcu(0xDE, 2, 0x00, 0x01);
+	run(100);
+	cursor = 0;
+	tap(640, 300);
+	THEN("mcu 4c 00 00");
+	NOT("cp touch");
+	NOT("screen home");	/* CarPlay is behind it, not Home */
+	mcu(0xDE, 2, 0x00, 0x00);
+	run(100);
+	cursor = 0;
+	tap(640, 300);
+	THEN("cp touch 1");
+	knob('r');
+	THEN("cp requestWheelStatus 0 0 1");
+}
+
+/* The car's time, about once a minute, is the clock; it runs on between. */
+static void s_clock(void)
+{
+	nobody_drives();
+	CHECK(same(model()->clock, ""));
+	mcu(0xD0, 9, 0x10, 0x00, 0x00, 26, 11, 25, 19, 12, 30);
+	run(100);
+	CHECK(same(model()->clock, "19:12"));
+	run(31000);
+	CHECK(same(model()->clock, "19:13"));	/* it was half past the minute */
+	mcu(0xD0, 9, 0x10, 0x00, 0x00, 26, 11, 25, 23, 59, 0);
+	run(61000);
+	CHECK(same(model()->clock, "00:00"));
+	mcu(0xD0, 9, 0x10, 0x00, 0x00, 26, 11, 25, 99, 99, 0);	/* nonsense is not shown */
+	run(100);
+	CHECK(same(model()->clock, "00:00") || same(model()->clock, "00:01"));
+}
+
 /* "Connect at ignition" off (CONNECT_AT_IGNITION=0): the profile's phone waits too. */
 static void s_connect_off(void)
 {
@@ -1357,7 +1464,7 @@ static void forget_from_list(const char *knobs_to_phone, const char *title)
 	snprintf(screen_, sizeof(screen_), "screen list %s", title);
 	THEN(screen_);
 	CHECK(same(st().list->rows[3].label, "Forget this phone") && !st().list->rows[3].disabled);
-	knobs("r" "pw");
+	knobs("rr" "pw");	/* past "Driver profile" */
 	snprintf(screen_, sizeof(screen_), "screen list Forget %s", title);
 	THEN(screen_);
 	knobs("r" "p");	/* past "Cancel": "Forget now" */
@@ -1823,6 +1930,11 @@ static const struct {
 	{ "carplay-gone", s_carplay_gone, "11:1 00:2 aa:0", NULL },
 	{ "update", s_update, "11:1 00:2 aa:0", NULL },
 	{ "app-confirm", s_app_confirm, "11:1 00:2 aa:0", NULL },
+	{ "profile-takes-phone", s_profile_takes_phone, "11:1 00:2 aa:0", NULL },
+	{ "profile-keeps-its-phone", s_profile_keeps_its_phone, "11:1 00:2 aa:0", NULL },
+	{ "knob-in-carplay", s_knob_in_carplay, "11:1 00:2 aa:0", NULL },
+	{ "car-picture-over-carplay", s_car_picture_over_carplay, "11:1 00:2 aa:0", NULL },
+	{ "clock", s_clock, "11:1 00:2 aa:0", NULL },
 	{ "developer", s_developer, "11:1 00:2 aa:0", NULL },
 	{ "developer-key", s_developer_key, "11:1 00:2 aa:0", NULL },
 	{ "developer-on", s_developer_on, "11:1 00:2 aa:0", NULL },

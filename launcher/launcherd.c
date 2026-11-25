@@ -370,6 +370,9 @@ static int night = -1;	/* car illumination: -1 unknown, 0 day, 1 night */
 
 static void cp_link(int status);
 static void profile_report(int p, int fresh);
+static void profile_assign(int code, int i);
+static int car_minutes = -1;	/* the car's time of day when it last said it, in minutes; -1 not yet */
+static long car_minutes_at_ms;
 
 /* One MCU report (frame verified). Phase 1 acts on illumination and logs
  * keys and ACC by code for the car session (docs/launcher-analysis.md,
@@ -396,12 +399,19 @@ static void mcu_report(int cmd, const unsigned char *d, int n)
 			 * frame per detent; keys 00 61 push, 00 62 Back, 00 63 MENU short;
 			 * 00 00 is a release. */
 			char c = d[2] == 1 ? (d[3] == 0x47 ? 'r' : d[3] == 0x46 ? 'l' : 0) :
-				 d[2] == 0 ? (d[3] == 0x61 ? 'p' : d[3] == 0x62 ? 'b' : d[3] == 0x63 ? 'm' : 0) : 0;
+				 d[2] == 0 ? (d[3] == 0x61 ? 'p' : d[3] == 0x62 ? 'b' : d[3] == 0x63 ? 'm' :
+					      d[3] == 0x25 ? 's' : 0) : 0;	/* 25: the key stock gave to Siri */
 
 			if (d[2] || d[3])
 				say("CAN key %02x %02x%s", d[2], d[3], c ? "" : " (no use for it)");
 			if (c)
 				core_key(c);
+		} else if (n >= 9 && d[0] == 0x10 && d[6] < 24 && d[7] < 60) {
+			/* The car's date and time (seen in the car, 2026-11-25: 10 00 00
+			 * yy mm dd hh mm ss, about once a minute): the top band's clock,
+			 * carried on by our own between reports. */
+			car_minutes = d[6] * 60 + d[7];
+			car_minutes_at_ms = now_ms() - d[8] % 60 * 1000L;
 		} else if (n >= 1 && d[0] == 0x4B) {
 			say("CAN key: %d bytes, sub 0x%02x 0x%02x 0x%02x", n, n > 1 ? d[1] : 0,
 			    n > 2 ? d[2] : 0, n > 3 ? d[3] : 0);
@@ -633,8 +643,13 @@ static void model_update(void)
 		chip[0] = 0;	/* no chip: that no phone is connected is on the tiles (owner, 2026-11-23) */
 	model.chip_text = chip;
 	model.bt = bt_mark();
-	model.clock = "";	/* the car's time: not decoded yet */
-	if (bench) {
+	model.clock = "";	/* until the car has said the time */
+	if (car_minutes >= 0) {
+		long minutes = car_minutes + (now_ms() - car_minutes_at_ms) / 60000;
+
+		snprintf(clock_text, sizeof(clock_text), "%02ld:%02ld", minutes / 60 % 24, minutes % 60);
+		model.clock = clock_text;
+	} else if (bench) {
 		/* 12:00 at the launcher's start, and it runs. A clock that is
 		 * wrong is worse than none, so not in the car. */
 		long minutes = 12 * 60 + now_ms() / 60000;
@@ -1149,6 +1164,12 @@ static void cp_link(int status)
 	io_call(CP_DEST, CP_PATH, CP_IFACE, "requestLinkStatus", a, 2);
 }
 
+static void cp_wheel(int pressed, int step)
+{
+	struct dbm_arg a[3] = { { 'i', 0, 0 }, { 'i', pressed, 0 }, { 'i', step, 0 } };
+	io_call(CP_DEST, CP_PATH, CP_IFACE, "requestWheelStatus", a, 3);
+}
+
 static void audio(const char *member, int source)
 {
 	struct dbm_arg a[1] = { { 'i', source, 0 } };
@@ -1317,6 +1338,12 @@ static void link_status(int type, int status)
 			reveal_after_frames();
 		if (state != UP) {
 			state = UP;
+			/* The car's profile had no phone and the driver chose or paired
+			 * this one: it is that profile's phone now (design/screens.md,
+			 * Driver profile). Never under Guest, never over another's. */
+			if (profile_applied >= 0 && profile_number(profile_applied) &&
+			    profile_phone(profile_applied) == PROFILE_UNMAPPED && target >= 0)
+				profile_assign(profile_applied, target);
 			if (save_after_up) {
 				save_after_up = 0;
 				save_soon("first session of a new phone");
@@ -1718,6 +1745,26 @@ static void profile_store(void)
 	io_put(PROFILE_FILE, text);
 }
 
+/* Phone i is profile `code`'s phone from now on (code < 0: nobody's). A
+ * phone has one profile and a profile one phone. Kept. */
+static void profile_assign(int code, int i)
+{
+	if (i < 0 || i >= nphones)
+		return;
+	for (int c = 0; c < 256; c++)
+		if (!strcmp(profile_addr[c], phones[i].addr))
+			profile_addr[c][0] = 0;
+	if (code >= 0 && code < 256)
+		memcpy(profile_addr[code], phones[i].addr, sizeof(profile_addr[code]));
+	profile_store();
+	save_soon("driver profile");
+	if (code < 0)
+		say("phone %d: no driver profile from now on", i + 1);
+	else
+		say("car profile %02x: phone %d is its phone from now on", code, i + 1);
+	ui_sync();
+}
+
 /* The kept mapping stands in place of PROFILE_PHONES. */
 static void profile_restore(void)
 {
@@ -2101,8 +2148,14 @@ static void on_event(enum ui_event ev, int arg, int value)
 	case UI_EV_UPDATE:
 		update_start();
 		break;
-	case UI_EV_PROFILE:
-		break;	/* not wired yet: its row is switched off */
+	case UI_EV_PROFILE: {	/* a phone's own list: "None", "Profile 1" to "Profile 3" */
+		static const int codes[4] = { -1, 0x00, 0x11, 0x22 };
+
+		if (value >= 0 && value <= 3)
+			profile_assign(codes[value], arg);
+		model_update();
+		break;
+	}
 	}
 }
 
@@ -2132,8 +2185,22 @@ void core_key(char c)
 		ui_nav_cover();
 		ui_display_draw_now();
 		picture_to_car();
+	} else if (state == UP && phone_screen && pic_source == 0) {
+		/* CarPlay has the screen: the knob is its own. Turn and push as
+		 * stock's launcher passed them (a wheel step; select down and up);
+		 * Back as carplay's own Back key, which stock never used (3; 1 is
+		 * its Home: tried in the car, 2026-11-25); the voice key as stock's
+		 * (4: Siri). */
+		if (c == 'l' || c == 'r') {
+			cp_wheel(0, c == 'r' ? 1 : -1);
+		} else if (c == 'p') {
+			cp_wheel(1, 0);
+			cp_wheel(0, 0);
+		} else if (c == 'b' || c == 's') {
+			struct dbm_arg a[1] = { { 'i', c == 'b' ? 3 : 4, 0 } };
+			io_call(CP_DEST, CP_PATH, CP_IFACE, "requestKeyValue", a, 1);
+		}
 	}
-	/* The knob inside CarPlay is CarPlay's: not passed on yet. */
 }
 
 /* ---- touch ---- */
@@ -2153,20 +2220,27 @@ static void send_touch(int type, int x, int y)
 
 /* The first finger, per gesture. The launcher's, if the unit's picture is
  * showing and the navigation says so (a launcher screen, the cover, the
- * banner and 24px around it); CarPlay's, if a session has the screen;
- * otherwise it is a touch on the car's picture, which brings Home. */
+ * banner and 24px around it); CarPlay's, if a session has the screen and
+ * the unit's picture is showing; otherwise it is a touch on the car's
+ * picture, which brings the unit's: CarPlay if it runs behind, else Home.
+ * (In the car, 2026-11-25: the car had taken the picture back over a running
+ * CarPlay, and every touch went on to CarPlay behind it; nothing brought
+ * the unit's picture forward again.) */
 void core_touch(int type, int x, int y)
 {
-	static int owner;	/* per gesture: 1 the launcher, 2 CarPlay, 3 bring Home */
+	static int owner;	/* per gesture: 1 the launcher, 2 CarPlay, 3 bring Home, 4 bring CarPlay */
 
 	if (type == 1)
 		owner = ui_ok && pic_source == 0 && ui_nav_owns(x, y) ? 1 :
-			state == UP && phone_screen ? 2 : 3;
+			state == UP && phone_screen ? (pic_source == 1 ? 4 : 2) : 3;
 	if (owner == 1)
 		ui_display_touch(x, y, type != 3);
 	else if (owner == 2)
 		send_touch(type, x, y);
-	else if (owner == 3 && type == 1) {
+	else if (owner == 4 && type == 1) {
+		say("touch on the car's picture: CarPlay is behind it");
+		picture_to_unit();
+	} else if (owner == 3 && type == 1) {
 		if (ui_ok) {
 			/* Drawn before the picture comes to the unit: behind the
 			 * layer is CarPlay's last (stale) frame. */
@@ -2219,7 +2293,7 @@ static void settings_start(void)
 	/* A name and a forgotten phone need the state to be kept; at the bench
 	 * they can be tried without. */
 	if (bench || io_state_kept())
-		model.name_off = model.forget_off = 0;
+		model.name_off = model.forget_off = model.profile_off = 0;
 	model.can_update = io_state_kept();	/* an update is kept on the state partition */
 	int dev = io_dev_state();	/* the system's own word: it starts the server itself at boot */
 
@@ -2445,7 +2519,14 @@ void core_tick(void)
 		seek(auto_phone, 1, 0, 0);
 		ui_sync();
 	}
-	if (bench && now_ms() / 60000 != clock_minute) {	/* the stand-in clock runs */
+	if (car_minutes >= 0) {	/* the car's clock, carried on: the band follows the minute */
+		long minute = car_minutes + (now_ms() - car_minutes_at_ms) / 60000;
+
+		if (minute != clock_minute) {
+			clock_minute = minute;
+			ui_sync();
+		}
+	} else if (bench && now_ms() / 60000 != clock_minute) {	/* the stand-in clock runs */
 		clock_minute = now_ms() / 60000;
 		ui_sync();
 	}

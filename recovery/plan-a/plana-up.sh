@@ -168,7 +168,25 @@ run() {
             Launcher -t -audio > /tmp/audio.log 2>&1 &
         ' > $R/tmp/plana-run.log 2>&1 < /dev/null
         $B usleep 2000000
-        $A/bin/launcherd > /tmp/launcherd.log 2>&1 < /dev/null &
+        # The launcher is started again if it ends, and what it last said is
+        # kept beside (it crashed once in the car, 2026-11-25, and left
+        # CarPlay running with no way back to Home). Five ends within a
+        # minute and it is left alone: something is wrong that a restart
+        # does not mend.
+        (
+            n=0; t0=$($B cut -d. -f1 /proc/uptime)
+            while :; do
+                $A/bin/launcherd > /tmp/launcherd.log 2>&1 < /dev/null
+                rc=$?
+                $B cp /tmp/launcherd.log /tmp/launcherd-ended.log
+                now=$($B cut -d. -f1 /proc/uptime)
+                echo "launcherd ended with $rc at $now s" >> /tmp/launcherd-ends.log
+                [ $((now - t0)) -gt 60 ] && { n=0; t0=$now; }
+                n=$((n + 1))
+                [ $n -ge 5 ] && { echo 'five ends within a minute: not started again' >> /tmp/launcherd-ends.log; break; }
+                $B sleep 1
+            done
+        ) > /dev/null 2>&1 < /dev/null &
         say "run started (new Launcher): logs /tmp/launcherd.log, $R/tmp/gocsdk.log, /tmp/mcu.log"
         return
     fi

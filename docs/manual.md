@@ -13,14 +13,17 @@ no phone connects by itself, and steps aside as soon as its job is done.
 
 | You want | Do |
 | --- | --- |
-| The launcher, from the BMW picture | Touch the screen |
+| The unit's picture, from the BMW picture | Touch the screen: CarPlay if a session is running, otherwise the launcher |
 | To switch between the BMW picture and the unit's (CarPlay if a session is up, otherwise the launcher) | Long press MENU on the controller |
 | Back to the BMW picture, from the launcher's Home | The controller's Back, or MENU |
 | The BMW picture, from CarPlay | CarPlay's car icon, or a short press of MENU |
-| Back into CarPlay | Long press MENU; or touch the screen and push the connected phone's tile |
+| Back into CarPlay | Touch the screen, or long press MENU |
 
-Every screen works with the controller's knob (turn to move the amber ring,
-push to choose, Back to go up) and by touch.
+Every launcher screen works with the controller's knob (turn to move the
+amber ring, push to choose, Back to go up) and by touch.
+
+Inside CarPlay the knob is CarPlay's: turn moves its selection, push
+chooses, and Back is CarPlay's own Back. MENU stays the car's.
 
 ## Home
 
@@ -38,7 +41,8 @@ next page. Each phone is in one state:
 
 At the top: the phone CarPlay is running with, the Bluetooth mark (there
 when Bluetooth is up, with a short line at either side when a phone is
-connected), and the clock. The cog under the tiles opens Settings.
+connected), and the clock, which is the car's own time once the car has
+said it. The cog under the tiles opens Settings.
 
 **Pair a phone** is always the last tile, so Home is never empty:
 
@@ -85,8 +89,8 @@ at all. **This needs the optional MCU patch** (`mcu/profile`), which makes
 the MCU pass the profile on; without it nothing connects by itself: touch
 the screen and push a tile.
 
-- A profile without a phone waits on Home and says so. The phone you choose
-  there becomes that profile's phone:
+- A profile without a phone waits on Home and says so. The phone you connect
+  or pair there becomes that profile's phone, once CarPlay is up with it:
 
   ![A profile without a phone](manual/home-profile.png)
 
@@ -100,9 +104,9 @@ the screen and push a tile.
 - "Connect at ignition" (General) set to Off means the unit never connects
   by itself.
 
-The "Driver profile" row in a phone's own list is shown dimmed: giving a
-phone a profile there is not finished. Profiles are given by choosing a
-phone on Home under that profile, or in the build's `PLANA.CFG`.
+A phone's own list (General → Paired phones → the phone) has a **Driver
+profile** row: None, or Profile 1 to 3. Giving a phone a profile that
+another phone holds moves the profile to it.
 
 ## Settings
 

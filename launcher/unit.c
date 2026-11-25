@@ -478,6 +478,18 @@ void io_sound(int which)
 		sound_open();
 	if (sound_fd < 0)
 		return;
+	/* Never more than one sound waiting behind the one that plays: a run
+	 * of knob steps piled up in the pipe and played on after the hand had
+	 * stopped (owner, in the car, 2026-11-25). A late sound is worse than
+	 * none: it is dropped. */
+	{
+		static long busy_until_ms;
+		long now = io_now_ms(), length = frames * 1000L / sound_rate;
+
+		if (busy_until_ms - now > length)
+			return;
+		busy_until_ms = (busy_until_ms > now ? busy_until_ms : now) + length;
+	}
 	memcpy(block, s->pcm, s->frames * sizeof(block[0]));
 	memset(block + s->frames, 0, (frames - s->frames) * sizeof(block[0]));
 	/* All of it or none: a pipe takes a write of this size whole when it has
